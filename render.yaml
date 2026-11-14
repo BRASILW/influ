@@ -1,0 +1,21 @@
+services:
+  - type: worker
+    name: influenciadores-discord-bot
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    disk:
+      name: bot-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: DATABASE_PATH
+        value: /var/data/influenciadores.sqlite
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: CLIENT_ID
+        sync: false
+      - key: GUILD_ID
+        sync: false
+      - key: POST_CHANNEL_ID
+        sync: false
