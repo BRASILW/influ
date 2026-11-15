@@ -43,7 +43,8 @@
 
 ## Status das calls
 - Administradores usam `/status` para criar ou atualizar um painel de voz; ele pode ser enviado no canal atual ou em um canal escolhido.
-- O painel mostra membros humanos em call, a call mais cheia, pessoas mutadas ou surdas, câmeras ligadas, transmissões de tela, entradas na última hora e o total de membros do servidor. A contagem de entradas começa após a atualização do bot.
+- O painel mostra participantes em call (incluindo bots), a call mais cheia, pessoas mutadas ou surdas, câmeras ligadas, transmissões de tela, entradas na última hora e o total de membros do servidor. A contagem de entradas começa após a atualização do bot.
+- Os títulos usam os emojis personalizados do servidor.
 - O painel é editado a cada 5 segundos. O canal e a mensagem ficam salvos no SQLite para continuar após reinícios; use `/status` novamente para atualizar o banner ou mudar o canal.
 - O parâmetro `banner` aceita uma URL HTTPS. O bot precisa das permissões **View Channel**, **Send Messages**, **Embed Links** e **Read Message History** no canal.
 

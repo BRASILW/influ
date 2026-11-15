@@ -1078,23 +1078,24 @@ function getLiveVoiceMetrics(guild) {
     topChannel: null
   };
 
-  for (const channel of guild.channels.cache.values()) {
-    if (!channel.isVoiceBased()) continue;
+  const channelCounts = new Map();
+  for (const voiceState of guild.voiceStates.cache.values()) {
+    if (!voiceState.channelId) continue;
 
-    const members = [...channel.members.values()].filter(member => !member.user.bot);
-    metrics.total += members.length;
-    if (!metrics.topChannel || members.length > metrics.topChannel.count) {
-      if (members.length > 0) {
-        metrics.topChannel = { id: channel.id, count: members.length };
-      }
-    }
+    metrics.total += 1;
+    channelCounts.set(
+      voiceState.channelId,
+      (channelCounts.get(voiceState.channelId) || 0) + 1
+    );
+    if (voiceState.selfMute || voiceState.serverMute) metrics.muted += 1;
+    if (voiceState.selfDeaf || voiceState.serverDeaf) metrics.deafened += 1;
+    if (voiceState.streaming) metrics.streaming += 1;
+    if (voiceState.selfVideo) metrics.camera += 1;
+  }
 
-    for (const member of members) {
-      const voice = member.voice;
-      if (voice.selfMute || voice.serverMute) metrics.muted += 1;
-      if (voice.selfDeaf || voice.serverDeaf) metrics.deafened += 1;
-      if (voice.streaming) metrics.streaming += 1;
-      if (voice.selfVideo) metrics.camera += 1;
+  for (const [channelId, count] of channelCounts) {
+    if (!metrics.topChannel || count > metrics.topChannel.count) {
+      metrics.topChannel = { id: channelId, count };
     }
   }
 
@@ -1108,34 +1109,34 @@ function createLiveStatusEmbed(guild, bannerUrl) {
 
   const embed = new EmbedBuilder()
     .setColor(0x9b59b6)
-    .setTitle(`💜 Temos ${metrics.total} membros em call!`)
+    .setTitle(`<:Usurio:1571330785422606396> Temos ${metrics.total} participantes em call!`)
     .setDescription("Atividade atualizada automaticamente a cada 5 segundos.")
     .addFields(
       {
-        name: "🏆 TOP Call",
+        name: "<:7567:1571332054128402462> TOP Call",
         value: metrics.topChannel
           ? `<#${metrics.topChannel.id}> — ${metrics.topChannel.count} membros`
           : "Nenhum membro em call no momento.",
         inline: false
       },
       {
-        name: "🎙️ Atividade de voz",
+        name: "<a:012Blue_Stars2:1571656389346992270> Atividade de voz",
         value: `**Membros em call:** ${previousCount === undefined ? metrics.total : `${previousCount} → ${metrics.total}`}\n` +
           `**Mutados:** ${metrics.muted} • **Surdos:** ${metrics.deafened} • **Sem mute:** ${metrics.total - metrics.muted}`,
         inline: false
       },
       {
-        name: "📹 Câmera e transmissão",
+        name: "<a:1327037490477010984:1571330274531213402> Câmera e transmissão",
         value: `**Transmitindo tela:** ${metrics.streaming} • **Câmera ligada:** ${metrics.camera}`,
         inline: true
       },
       {
-        name: "👥 Servidor",
+        name: "<:we_cat:1571643615204212798> Servidor",
         value: `${guild.memberCount} membros`,
         inline: true
       },
       {
-        name: "📈 Novos membros",
+        name: "<a:012Blue_Stars2:1571656389346992270> Novos membros",
         value: `${metrics.recentJoins} na última hora`,
         inline: true
       }
