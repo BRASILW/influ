@@ -130,6 +130,12 @@ db.exec(`
     channel_id TEXT NOT NULL,
     message_id TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS tinder_panel_settings (
+    guild_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    color INTEGER NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS tinder_match_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     guild_id TEXT NOT NULL,
@@ -272,7 +278,22 @@ const commands = [
         .setName("canal")
         .setDescription("Canal onde o painel ficará (padrão: canal atual)")
         .setRequired(false)
-        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement))),
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement))
+      .addStringOption(option => option
+        .setName("titulo")
+        .setDescription("Novo título do painel")
+        .setRequired(false)
+        .setMaxLength(256))
+      .addStringOption(option => option
+        .setName("descricao")
+        .setDescription("Nova descrição do painel")
+        .setRequired(false)
+        .setMaxLength(1000))
+      .addStringOption(option => option
+        .setName("cor")
+        .setDescription("Nova cor hexadecimal, por exemplo #EB459E")
+        .setRequired(false)
+        .setMaxLength(7))),
   new SlashCommandBuilder()
     .setName("mute")
     .setDescription("Silencia um membro temporariamente sem removê-lo da call")
@@ -1260,7 +1281,6 @@ async function handleLiveStatusCommand(interaction) {
     liveStatusMessageCache.set(guildId, message);
 
     let previousMessageWarning = "";
-    let previousPanelWarning = "";
     if (existing && existing.channel_id !== channel.id) {
       try {
         const oldChannel = await client.channels.fetch(existing.channel_id);
@@ -1319,14 +1339,16 @@ async function refreshLiveStatusMessages() {
   }
 }
 
-function createTinderPanelPayload() {
+function createTinderPanelPayload(guildId) {
+  const settings = db.prepare(
+    "SELECT title, description, color FROM tinder_panel_settings WHERE guild_id = ?"
+  ).get(guildId);
   const embed = new EmbedBuilder()
-    .setColor(0xeb459e)
-    .setTitle("Tinder do servidor")
-    .setDescription(
+    .setColor(settings?.color ?? 0xeb459e)
+    .setTitle(settings?.title || "Tinder do servidor")
+    .setDescription(settings?.description ||
       `Crie ou atualize seu perfil para aparecer em <#${tinderProfileChannelId}>. ` +
-      "Ao continuar, você confirma que tem 18 anos ou mais e autoriza a publicação das informações e da mídia do perfil."
-    )
+      "Ao continuar, você confirma que tem 18 anos ou mais e autoriza a publicação das informações e da mídia do perfil.")
     .addFields({
       name: "Como funciona",
       value: "Veja os perfis, escolha **Dar match** e aguarde a resposta por DM. Matches aceitos ganham um canal privado no servidor."
@@ -1358,6 +1380,19 @@ async function handleTinderPanelCommand(interaction) {
     return interaction.reply({ content: "Somente administradores podem configurar o painel.", ephemeral: true });
   }
 
+  const titleInput = interaction.options.getString("titulo");
+  const descriptionInput = interaction.options.getString("descricao");
+  const colorInput = interaction.options.getString("cor");
+  if (titleInput !== null && !titleInput.trim()) {
+    return interaction.reply({ content: "O título do painel não pode ficar vazio.", ephemeral: true });
+  }
+  if (descriptionInput !== null && !descriptionInput.trim()) {
+    return interaction.reply({ content: "A descrição do painel não pode ficar vazia.", ephemeral: true });
+  }
+  if (colorInput !== null && !/^#?[0-9a-f]{6}$/i.test(colorInput.trim())) {
+    return interaction.reply({ content: "A cor precisa estar no formato hexadecimal, por exemplo #EB459E.", ephemeral: true });
+  }
+
   const channel = interaction.options.getChannel("canal") || interaction.channel;
   if (!channel?.isTextBased() || typeof channel.send !== "function" ||
       channel.guildId !== interaction.guildId) {
@@ -1366,6 +1401,33 @@ async function handleTinderPanelCommand(interaction) {
 
   await interaction.deferReply({ ephemeral: true });
   try {
+    if (titleInput !== null || descriptionInput !== null || colorInput !== null) {
+      const currentSettings = db.prepare(
+        "SELECT title, description, color FROM tinder_panel_settings WHERE guild_id = ?"
+      ).get(interaction.guildId);
+      db.prepare(`
+        INSERT INTO tinder_panel_settings (guild_id, title, description, color)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(guild_id) DO UPDATE SET
+          title = excluded.title,
+          description = excluded.description,
+          color = excluded.color
+      `).run(
+        interaction.guildId,
+        titleInput === null
+          ? currentSettings?.title || "Tinder do servidor"
+          : sanitizeTinderText(titleInput.trim()),
+        descriptionInput === null
+          ? currentSettings?.description ||
+            `Crie ou atualize seu perfil para aparecer em <#${tinderProfileChannelId}>. ` +
+            "Ao continuar, você confirma que tem 18 anos ou mais e autoriza a publicação das informações e da mídia do perfil."
+          : sanitizeTinderText(descriptionInput.trim()),
+        colorInput === null
+          ? currentSettings?.color ?? 0xeb459e
+          : Number.parseInt(colorInput.trim().replace(/^#/, ""), 16)
+      );
+    }
+
     const profileChannel = await client.channels.fetch(tinderProfileChannelId);
     if (!profileChannel?.isTextBased() || profileChannel.guildId !== interaction.guildId) {
       throw new Error(`O canal de perfis ${tinderProfileChannelId} não está acessível neste servidor.`);
@@ -1384,9 +1446,9 @@ async function handleTinderPanelCommand(interaction) {
     }
 
     if (message) {
-      await message.edit(createTinderPanelPayload());
+      await message.edit(createTinderPanelPayload(interaction.guildId));
     } else {
-      message = await channel.send(createTinderPanelPayload());
+      message = await channel.send(createTinderPanelPayload(interaction.guildId));
     }
 
     db.prepare(`
@@ -1397,6 +1459,7 @@ async function handleTinderPanelCommand(interaction) {
         message_id = excluded.message_id
     `).run(interaction.guildId, channel.id, message.id);
 
+    let previousPanelWarning = "";
     if (existing && existing.channel_id !== channel.id) {
       try {
         const oldChannel = await client.channels.fetch(existing.channel_id);
@@ -1452,7 +1515,7 @@ function createTinderProfileModal() {
     .setRequired(true)
     .setMinValues(1)
     .setMaxValues(1)
-    .setFileTypes("image", "video", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".mov", ".webm", ".m4v");
+    .setFileTypes(".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".mov", ".webm", ".m4v");
 
   return new ModalBuilder()
     .setCustomId("tinder:profile")

@@ -50,7 +50,8 @@
 - O parâmetro `banner` aceita uma URL HTTPS. O bot precisa das permissões **View Channel**, **Send Messages**, **Embed Links** e **Read Message History** no canal.
 
 ## Tinder
-- Um administrador usa `/tinder painel` para criar ou atualizar o painel; o canal onde os perfis são publicados é `1570582366630576220`.
+- Somente administradores podem usar `/tinder painel` para criar ou atualizar o painel. As opções `titulo`, `descricao`, `cor` e `canal` personalizam sua aparência e destino; por exemplo, `/tinder painel titulo:Encontre seu match cor:#FF55AA`.
+- O canal onde os perfis são publicados é `1570582366630576220`.
 - O botão de cadastro pede confirmação de maioridade e consentimento antes de abrir o formulário. O perfil exige uma foto ou vídeo (até 25 MB), gênero, idade mínima de 18 anos e cidade; a bio é opcional.
 - Os perfis e a mídia são públicos nesse canal. Usuários podem dar match ou passar; um match gera uma solicitação privada por DM. Ao aceitar, o bot atualiza a solicitação e cria um canal visível apenas aos dois participantes e ao bot.
 - O botão do painel permite atualizar ou remover o perfil e consultar matches. Ao remover, o perfil público é apagado e solicitações pendentes são canceladas.
