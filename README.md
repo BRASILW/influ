@@ -35,6 +35,12 @@
 - As alterações são salvas por servidor no SQLite e aplicadas automaticamente aos painéis e publicações existentes; não é necessário executar `!painel` novamente.
 - O destaque dos cartões de publicação e a cor padrão do painel são pretos.
 
+## Embeds personalizados
+- Administradores podem usar `/embed` para enviar um embed com mensagem obrigatória e título, banner, thumbnail, rodapé, autor, cor hexadecimal, canal de destino e convite do servidor opcionais.
+- Banner e thumbnail devem ser URLs HTTPS. Se nenhum canal for informado, o embed é enviado no canal em que o comando foi usado.
+- Todo embed inclui um botão **Discord** com o emoji do servidor e o convite `https://discord.gg/KY4AEkxEeT`; a opção `convite` pode substituir o link nesse envio.
+- O bot precisa das permissões **View Channel**, **Send Messages** e **Embed Links** no canal de destino.
+
 ## Moderação
 - Moderadores com **Moderate Members** podem usar `/mute membro:<menção ou ID> tempo:<1h ou 2d> motivo:<texto>`. O limite continua sendo 28 dias.
 - O bot aplica mute de voz do servidor sem desconectar a pessoa, adiciona o cargo `1571368553926369361`, envia o motivo e o vencimento por DM e registra a ação no canal `1571282224660357182`.

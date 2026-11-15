@@ -3,7 +3,7 @@ require("dotenv").config();
 const http = require("node:http");
 const {
   Client, GatewayIntentBits, Partials, REST, Routes,
-  SlashCommandBuilder, EmbedBuilder, ActionRowBuilder,
+  SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ChannelType,
   ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder,
   TextInputStyle, AttachmentBuilder, FileUploadBuilder, LabelBuilder,
   ContainerBuilder, MediaGalleryBuilder, MediaGalleryItemBuilder,
@@ -109,6 +109,7 @@ const defaultPanelDescription =
   "Clique no botão para enviar sua publicação. Informe seus links do TikTok e Instagram e anexe o vídeo no formulário.";
 const defaultPanelFooter = "Publique apenas vídeos que você tem autorização para divulgar.";
 const defaultPanelColor = 0x000000;
+const defaultDiscordInviteUrl = "https://discord.gg/KY4AEkxEeT";
 const configRoleId = "1570091171848392825";
 const muteRoleId = "1571368553926369361";
 const muteLogChannelId = "1571282224660357182";
@@ -135,6 +136,55 @@ const commands = [
   new SlashCommandBuilder()
     .setName("configurar-painel")
     .setDescription("Abre as configurações do painel"),
+  new SlashCommandBuilder()
+    .setName("embed")
+    .setDescription("Cria um embed personalizado")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption(option => option
+      .setName("mensagem")
+      .setDescription("Texto principal do embed")
+      .setRequired(true)
+      .setMaxLength(4096))
+    .addStringOption(option => option
+      .setName("titulo")
+      .setDescription("Título do embed")
+      .setRequired(false)
+      .setMaxLength(256))
+    .addStringOption(option => option
+      .setName("banner")
+      .setDescription("URL HTTPS da imagem grande")
+      .setRequired(false)
+      .setMaxLength(1000))
+    .addStringOption(option => option
+      .setName("thumbnail")
+      .setDescription("URL HTTPS da miniatura")
+      .setRequired(false)
+      .setMaxLength(1000))
+    .addStringOption(option => option
+      .setName("rodape")
+      .setDescription("Texto do rodapé")
+      .setRequired(false)
+      .setMaxLength(2048))
+    .addStringOption(option => option
+      .setName("autor")
+      .setDescription("Nome do autor exibido no embed")
+      .setRequired(false)
+      .setMaxLength(256))
+    .addStringOption(option => option
+      .setName("cor")
+      .setDescription("Cor hexadecimal, por exemplo #000000")
+      .setRequired(false)
+      .setMaxLength(7))
+    .addChannelOption(option => option
+      .setName("canal")
+      .setDescription("Canal de destino (padrão: canal atual)")
+      .setRequired(false)
+      .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement))
+    .addStringOption(option => option
+      .setName("convite")
+      .setDescription("Link do servidor para o botão Discord (padrão: convite configurado)")
+      .setRequired(false)
+      .setMaxLength(256)),
   new SlashCommandBuilder()
     .setName("mute")
     .setDescription("Silencia um membro temporariamente sem removê-lo da call")
@@ -902,6 +952,71 @@ function createPanelPayload(guildId) {
   return { embeds: [embed], components: [row] };
 }
 
+async function handleEmbedCommand(interaction) {
+  if (!interaction.inGuild()) {
+    return interaction.reply({ content: "Este comando só pode ser usado em um servidor.", ephemeral: true });
+  }
+  if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
+    return interaction.reply({ content: "Somente administradores podem criar embeds.", ephemeral: true });
+  }
+
+  const description = interaction.options.getString("mensagem", true).trim();
+  const title = interaction.options.getString("titulo")?.trim() || "";
+  const banner = interaction.options.getString("banner")?.trim() || "";
+  const thumbnail = interaction.options.getString("thumbnail")?.trim() || "";
+  const footer = interaction.options.getString("rodape")?.trim() || "";
+  const author = interaction.options.getString("autor")?.trim() || "";
+  const color = interaction.options.getString("cor")?.trim() || "";
+  const inviteUrl = interaction.options.getString("convite")?.trim() || defaultDiscordInviteUrl;
+
+  if (!description) {
+    return interaction.reply({ content: "A mensagem principal não pode ficar vazia.", ephemeral: true });
+  }
+  if ((banner && !isValidHttpsUrl(banner)) || (thumbnail && !isValidHttpsUrl(thumbnail))) {
+    return interaction.reply({ content: "Banner e thumbnail precisam ser URLs HTTPS válidas.", ephemeral: true });
+  }
+  if (!isValidDiscordInviteUrl(inviteUrl)) {
+    return interaction.reply({ content: "O convite precisa ser um link HTTPS válido do Discord.", ephemeral: true });
+  }
+  if (color && !/^#?[0-9a-f]{6}$/i.test(color)) {
+    return interaction.reply({ content: "A cor deve estar no formato `#RRGGBB`, por exemplo `#000000`.", ephemeral: true });
+  }
+  if (title.length + description.length + footer.length + author.length > 6000) {
+    return interaction.reply({ content: "O conteúdo do embed ultrapassa o limite de 6.000 caracteres.", ephemeral: true });
+  }
+
+  const embed = new EmbedBuilder().setDescription(description);
+  if (title) embed.setTitle(title);
+  if (banner) embed.setImage(banner);
+  if (thumbnail) embed.setThumbnail(thumbnail);
+  if (footer) embed.setFooter({ text: footer });
+  if (author) embed.setAuthor({ name: author });
+  if (color) embed.setColor(Number.parseInt(color.replace(/^#/, ""), 16));
+
+  const discordButton = new ButtonBuilder()
+    .setLabel("Discord")
+    .setStyle(ButtonStyle.Link)
+    .setURL(inviteUrl)
+    .setEmoji({ name: "we_cat", id: "1571643615204212798" });
+  const channel = interaction.options.getChannel("canal") || interaction.channel;
+  if (!channel?.isTextBased() || typeof channel.send !== "function") {
+    return interaction.reply({ content: "Escolha um canal de texto válido.", ephemeral: true });
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+  try {
+    await channel.send({
+      embeds: [embed],
+      components: [new ActionRowBuilder().addComponents(discordButton)],
+      allowedMentions: { parse: [] }
+    });
+    await interaction.editReply(`Embed enviado em <#${channel.id}>.`);
+  } catch (error) {
+    console.error(`Não foi possível enviar o embed no canal ${channel.id}:`, error);
+    await interaction.editReply("Não consegui enviar o embed. Verifique se o bot pode ver o canal, enviar mensagens e incorporar links.");
+  }
+}
+
 function isValidSocialUrl(value, host) {
   if (!value) return true;
   try {
@@ -915,6 +1030,18 @@ function isValidSocialUrl(value, host) {
 function isValidHttpsUrl(value) {
   try {
     return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function isValidDiscordInviteUrl(value) {
+  try {
+    const url = new URL(value);
+    const isDiscordGg = ["discord.gg", "www.discord.gg"].includes(url.hostname);
+    const isDiscordInvite = ["discord.com", "www.discord.com"].includes(url.hostname) &&
+      url.pathname.startsWith("/invite/");
+    return url.protocol === "https:" && (isDiscordGg || isDiscordInvite);
   } catch {
     return false;
   }
@@ -1241,6 +1368,10 @@ client.on("interactionCreate", async interaction => {
 
     if (interaction.isChatInputCommand() && interaction.commandName === "unmute") {
       return await handleUnmuteCommand(interaction);
+    }
+
+    if (interaction.isChatInputCommand() && interaction.commandName === "embed") {
+      return await handleEmbedCommand(interaction);
     }
 
     if (interaction.isChatInputCommand() && interaction.commandName === "configurar-painel") {
