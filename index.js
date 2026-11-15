@@ -16,6 +16,9 @@ const {
 
 const required = ["DISCORD_TOKEN", "GUILD_ID"];
 const voiceChannelId = "1571359738682286161";
+const tinderProfileChannelId = "1570582366630576220";
+const maxTinderMediaSize = 25 * 1024 * 1024;
+const tinderGenders = ["Homem", "Mulher", "Não binário", "Outro", "Prefiro não informar"];
 for (const key of required) {
   if (!process.env[key]) {
     console.error(`Está faltando a variável ${key}. Configure-a no ambiente ou no arquivo .env local.`);
@@ -106,6 +109,47 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_guild_member_joins_guild_time
     ON guild_member_joins (guild_id, joined_at);
+  CREATE TABLE IF NOT EXISTS tinder_profiles (
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    profile_channel_id TEXT NOT NULL,
+    profile_message_id TEXT NOT NULL,
+    bio TEXT NOT NULL DEFAULT '',
+    gender TEXT NOT NULL,
+    age INTEGER NOT NULL,
+    city TEXT NOT NULL,
+    media_name TEXT NOT NULL,
+    media_type TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (guild_id, user_id)
+  );
+  CREATE TABLE IF NOT EXISTS tinder_panel_messages (
+    guild_id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL,
+    message_id TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS tinder_match_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id TEXT NOT NULL,
+    sender_id TEXT NOT NULL,
+    recipient_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    request_channel_id TEXT,
+    request_message_id TEXT,
+    private_channel_id TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (guild_id, sender_id, recipient_id)
+  );
+  CREATE TABLE IF NOT EXISTS tinder_swipes (
+    guild_id TEXT NOT NULL,
+    swiper_id TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (guild_id, swiper_id, target_id)
+  );
 `);
 
 const activeMuteColumns = db.pragma("table_info(active_mutes)");
@@ -217,6 +261,18 @@ const commands = [
       .setDescription("URL HTTPS opcional da imagem do painel")
       .setRequired(false)
       .setMaxLength(1000)),
+  new SlashCommandBuilder()
+    .setName("tinder")
+    .setDescription("Configura o painel de perfis e matches")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addSubcommand(subcommand => subcommand
+      .setName("painel")
+      .setDescription("Cria ou atualiza o painel do Tinder")
+      .addChannelOption(option => option
+        .setName("canal")
+        .setDescription("Canal onde o painel ficará (padrão: canal atual)")
+        .setRequired(false)
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement))),
   new SlashCommandBuilder()
     .setName("mute")
     .setDescription("Silencia um membro temporariamente sem removê-lo da call")
@@ -1204,6 +1260,7 @@ async function handleLiveStatusCommand(interaction) {
     liveStatusMessageCache.set(guildId, message);
 
     let previousMessageWarning = "";
+    let previousPanelWarning = "";
     if (existing && existing.channel_id !== channel.id) {
       try {
         const oldChannel = await client.channels.fetch(existing.channel_id);
@@ -1260,6 +1317,842 @@ async function refreshLiveStatusMessages() {
       }
     }
   }
+}
+
+function createTinderPanelPayload() {
+  const embed = new EmbedBuilder()
+    .setColor(0xeb459e)
+    .setTitle("Tinder do servidor")
+    .setDescription(
+      `Crie ou atualize seu perfil para aparecer em <#${tinderProfileChannelId}>. ` +
+      "Ao continuar, você confirma que tem 18 anos ou mais e autoriza a publicação das informações e da mídia do perfil."
+    )
+    .addFields({
+      name: "Como funciona",
+      value: "Veja os perfis, escolha **Dar match** e aguarde a resposta por DM. Matches aceitos ganham um canal privado no servidor."
+    })
+    .setFooter({ text: "Somente maiores de 18 anos. Não publique informações que não queira compartilhar." });
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("tinder:create")
+      .setLabel("Criar / atualizar perfil")
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId("tinder:delete")
+      .setLabel("Remover meu perfil")
+      .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder()
+      .setCustomId("tinder:matches")
+      .setLabel("Meus matches")
+      .setStyle(ButtonStyle.Secondary)
+  );
+  return { embeds: [embed], components: [row], allowedMentions: { parse: [] } };
+}
+
+async function handleTinderPanelCommand(interaction) {
+  if (!interaction.inGuild()) {
+    return interaction.reply({ content: "Este comando só pode ser usado em um servidor.", ephemeral: true });
+  }
+  if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
+    return interaction.reply({ content: "Somente administradores podem configurar o painel.", ephemeral: true });
+  }
+
+  const channel = interaction.options.getChannel("canal") || interaction.channel;
+  if (!channel?.isTextBased() || typeof channel.send !== "function" ||
+      channel.guildId !== interaction.guildId) {
+    return interaction.reply({ content: "Escolha um canal de texto válido deste servidor.", ephemeral: true });
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+  try {
+    const profileChannel = await client.channels.fetch(tinderProfileChannelId);
+    if (!profileChannel?.isTextBased() || profileChannel.guildId !== interaction.guildId) {
+      throw new Error(`O canal de perfis ${tinderProfileChannelId} não está acessível neste servidor.`);
+    }
+
+    const existing = db.prepare(
+      "SELECT channel_id, message_id FROM tinder_panel_messages WHERE guild_id = ?"
+    ).get(interaction.guildId);
+    let message = null;
+    if (existing?.channel_id === channel.id) {
+      try {
+        message = await channel.messages.fetch(existing.message_id);
+      } catch (error) {
+        if (error.code !== 10008) throw error;
+      }
+    }
+
+    if (message) {
+      await message.edit(createTinderPanelPayload());
+    } else {
+      message = await channel.send(createTinderPanelPayload());
+    }
+
+    db.prepare(`
+      INSERT INTO tinder_panel_messages (guild_id, channel_id, message_id)
+      VALUES (?, ?, ?)
+      ON CONFLICT(guild_id) DO UPDATE SET
+        channel_id = excluded.channel_id,
+        message_id = excluded.message_id
+    `).run(interaction.guildId, channel.id, message.id);
+
+    if (existing && existing.channel_id !== channel.id) {
+      try {
+        const oldChannel = await client.channels.fetch(existing.channel_id);
+        if (oldChannel?.isTextBased()) {
+          const oldMessage = await oldChannel.messages.fetch(existing.message_id);
+          await oldMessage.delete();
+        }
+      } catch (error) {
+        if (error.code !== 10003 && error.code !== 10008) {
+          console.error(`Não foi possível remover o painel Tinder antigo ${existing.message_id}:`, error);
+          previousPanelWarning = " Não consegui apagar o painel antigo; ele pode ser removido manualmente.";
+        }
+      }
+    }
+
+    await interaction.editReply(`Painel do Tinder ativo em <#${channel.id}>.${previousPanelWarning}`);
+  } catch (error) {
+    console.error(`Não foi possível configurar o painel Tinder no servidor ${interaction.guildId}:`, error);
+    await interaction.editReply(
+      `Não consegui criar o painel. Verifique o canal de perfis <#${tinderProfileChannelId}> e as permissões do bot.`
+    );
+  }
+}
+
+function createTinderProfileModal() {
+  const bio = new TextInputBuilder()
+    .setCustomId("bio")
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(false)
+    .setMaxLength(400)
+    .setPlaceholder("Conte um pouco sobre você");
+  const gender = new TextInputBuilder()
+    .setCustomId("gender")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(40)
+    .setPlaceholder(tinderGenders.join(", "));
+  const age = new TextInputBuilder()
+    .setCustomId("age")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMinLength(2)
+    .setMaxLength(2)
+    .setPlaceholder("18 ou mais");
+  const city = new TextInputBuilder()
+    .setCustomId("city")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(80)
+    .setPlaceholder("Sua cidade");
+  const media = new FileUploadBuilder()
+    .setCustomId("media")
+    .setRequired(true)
+    .setMinValues(1)
+    .setMaxValues(1)
+    .setFileTypes("image", "video", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".mov", ".webm", ".m4v");
+
+  return new ModalBuilder()
+    .setCustomId("tinder:profile")
+    .setTitle("Criar seu perfil")
+    .addLabelComponents(
+      new LabelBuilder().setLabel("Bio (opcional)").setTextInputComponent(bio),
+      new LabelBuilder()
+        .setLabel("Gênero")
+        .setDescription(`Opções: ${tinderGenders.join(", ")}`)
+        .setTextInputComponent(gender),
+      new LabelBuilder().setLabel("Idade").setTextInputComponent(age),
+      new LabelBuilder().setLabel("Cidade").setTextInputComponent(city),
+      new LabelBuilder()
+        .setLabel("Foto ou vídeo")
+        .setDescription("Anexe uma imagem ou vídeo de até 25 MB.")
+        .setFileUploadComponent(media)
+    );
+}
+
+function isValidTinderMediaAttachment(attachment) {
+  if (!attachment || attachment.size > maxTinderMediaSize) return false;
+  const extension = attachment.name?.match(/\.[a-z0-9]+$/i)?.[0]?.toLowerCase() || "";
+  const imageExtensions = [".png", ".jpg", ".jpeg", ".gif", ".webp"];
+  const videoExtensions = [".mp4", ".mov", ".webm", ".m4v"];
+  const imageTypes = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+  const videoTypes = ["video/mp4", "video/quicktime", "video/webm", "video/x-m4v", "video/m4v"];
+  const contentType = attachment.contentType?.toLowerCase() || "";
+  if (contentType && contentType !== "application/octet-stream" &&
+      !imageTypes.includes(contentType) && !videoTypes.includes(contentType)) {
+    return false;
+  }
+  const isImage = imageExtensions.includes(extension) || imageTypes.includes(contentType);
+  const isVideo = videoExtensions.includes(extension) || videoTypes.includes(contentType);
+  if (!isImage && !isVideo) return false;
+  if (contentType.startsWith("image/") && !imageTypes.includes(contentType)) return false;
+  if (contentType.startsWith("video/") && !videoTypes.includes(contentType)) return false;
+  if (imageExtensions.includes(extension) && isVideo) return false;
+  if (videoExtensions.includes(extension) && isImage) return false;
+  return true;
+}
+
+function sanitizeTinderText(value) {
+  return value.replace(/@everyone|@here/gi, match => `@\u200b${match.slice(1)}`);
+}
+
+function getTinderMediaFileName(userId, attachment) {
+  const extension = attachment.name?.match(/\.(png|jpe?g|gif|webp|mp4|mov|webm|m4v)$/i)?.[0]?.toLowerCase();
+  const contentType = attachment.contentType?.toLowerCase() || "";
+  const fallbackExtension = contentType.startsWith("image/") ? ".jpg" : ".mp4";
+  return `tinder-${userId}-${Date.now()}${extension || fallbackExtension}`;
+}
+
+function getTinderMediaType(attachment) {
+  const contentType = attachment.contentType?.toLowerCase() || "";
+  if (contentType.startsWith("image/") || contentType.startsWith("video/")) return contentType;
+  const extension = attachment.name?.match(/\.(png|jpe?g|gif|webp|mp4|mov|webm|m4v)$/i)?.[0]?.toLowerCase();
+  const mediaTypes = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".webm": "video/webm",
+    ".m4v": "video/x-m4v"
+  };
+  return mediaTypes[extension] || "application/octet-stream";
+}
+
+function createTinderProfileEmbed(profile, displayName, avatarUrl) {
+  const embed = new EmbedBuilder()
+    .setColor(0xeb459e)
+    .setAuthor({ name: displayName, iconURL: avatarUrl })
+    .setTitle(`${profile.age} anos`)
+    .setDescription(profile.bio || "Sem bio.")
+    .addFields(
+      { name: "Gênero", value: profile.gender, inline: true },
+      { name: "Cidade", value: profile.city, inline: true }
+    )
+    .setFooter({ text: "Perfil 18+ • Use os botões para dar match ou passar." });
+
+  if (profile.media_type.startsWith("image/")) {
+    embed.setImage(`attachment://${profile.media_name}`);
+  }
+  return embed;
+}
+
+function createTinderProfileButtons(userId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`tinder:like:${userId}`)
+      .setLabel("Dar match")
+      .setEmoji("❤️")
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`tinder:pass:${userId}`)
+      .setLabel("Passar")
+      .setStyle(ButtonStyle.Secondary)
+  );
+}
+
+async function handleTinderProfileSubmit(interaction) {
+  if (!interaction.inGuild()) {
+    return interaction.reply({ content: "O perfil só pode ser criado dentro do servidor.", ephemeral: true });
+  }
+
+  const bio = sanitizeTinderText(interaction.fields.getTextInputValue("bio").trim());
+  const genderInput = interaction.fields.getTextInputValue("gender").trim();
+  const gender = tinderGenders.find(value => value.toLocaleLowerCase("pt-BR") === genderInput.toLocaleLowerCase("pt-BR"));
+  const ageInput = interaction.fields.getTextInputValue("age").trim();
+  const age = Number(ageInput);
+  const city = sanitizeTinderText(interaction.fields.getTextInputValue("city").trim());
+  const attachment = interaction.fields.getUploadedFiles("media")?.first();
+
+  if (!gender) {
+    return interaction.reply({
+      content: `Escolha um gênero da lista: ${tinderGenders.join(", ")}.`,
+      ephemeral: true
+    });
+  }
+  if (!/^\d{2}$/.test(ageInput) || !Number.isInteger(age) || age < 18 || age > 99) {
+    return interaction.reply({ content: "O Tinder do servidor é somente para maiores de 18 anos.", ephemeral: true });
+  }
+  if (!city || city.length > 80) {
+    return interaction.reply({ content: "Informe uma cidade válida, com até 80 caracteres.", ephemeral: true });
+  }
+  if (bio.length > 400) {
+    return interaction.reply({ content: "A bio pode ter no máximo 400 caracteres.", ephemeral: true });
+  }
+  if (!isValidTinderMediaAttachment(attachment)) {
+    return interaction.reply({
+      content: "Anexe uma foto PNG, JPG, GIF ou WEBP, ou vídeo MP4, MOV, WEBM ou M4V, de até 25 MB.",
+      ephemeral: true
+    });
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+  let sentMessage;
+  try {
+    const profileChannel = await client.channels.fetch(tinderProfileChannelId);
+    if (!profileChannel?.isTextBased() || profileChannel.guildId !== interaction.guildId ||
+        typeof profileChannel.send !== "function") {
+      throw new Error(`Canal de perfis indisponível: ${tinderProfileChannelId}`);
+    }
+
+    const mediaResponse = await fetch(attachment.url);
+    if (!mediaResponse.ok) throw new Error(`Download de mídia falhou com HTTP ${mediaResponse.status}.`);
+    const mediaBuffer = Buffer.from(await mediaResponse.arrayBuffer());
+    if (mediaBuffer.length > maxTinderMediaSize) {
+      await interaction.editReply("O arquivo excede o limite de 25 MB.");
+      return;
+    }
+
+    const mediaName = getTinderMediaFileName(interaction.user.id, attachment);
+    const profile = {
+      bio,
+      gender,
+      age,
+      city,
+      media_name: mediaName,
+      media_type: getTinderMediaType(attachment)
+    };
+    const displayName = interaction.member?.displayName ||
+      interaction.user.globalName ||
+      interaction.user.username;
+    const oldProfile = db.prepare(
+      "SELECT profile_channel_id, profile_message_id FROM tinder_profiles WHERE guild_id = ? AND user_id = ?"
+    ).get(interaction.guildId, interaction.user.id);
+
+    sentMessage = await profileChannel.send({
+      embeds: [createTinderProfileEmbed(profile, displayName, interaction.user.displayAvatarURL())],
+      components: [createTinderProfileButtons(interaction.user.id)],
+      files: [new AttachmentBuilder(mediaBuffer, { name: mediaName })],
+      allowedMentions: { parse: [] }
+    });
+
+    try {
+      db.prepare(`
+        INSERT INTO tinder_profiles (
+          guild_id, user_id, profile_channel_id, profile_message_id,
+          bio, gender, age, city, media_name, media_type, active, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+        ON CONFLICT(guild_id, user_id) DO UPDATE SET
+          profile_channel_id = excluded.profile_channel_id,
+          profile_message_id = excluded.profile_message_id,
+          bio = excluded.bio,
+          gender = excluded.gender,
+          age = excluded.age,
+          city = excluded.city,
+          media_name = excluded.media_name,
+          media_type = excluded.media_type,
+          active = 1,
+          updated_at = CURRENT_TIMESTAMP
+      `).run(
+        interaction.guildId,
+        interaction.user.id,
+        profileChannel.id,
+        sentMessage.id,
+        bio,
+        gender,
+        age,
+        city,
+        mediaName,
+        profile.media_type
+      );
+    } catch (error) {
+      await sentMessage.delete().catch(deleteError => {
+        console.error("Não foi possível remover um perfil Tinder publicado sem registro:", deleteError);
+      });
+      throw error;
+    }
+
+    let oldProfileWarning = "";
+    if (oldProfile) {
+      try {
+        const oldChannel = await client.channels.fetch(oldProfile.profile_channel_id);
+        if (oldChannel?.isTextBased()) {
+          const oldMessage = await oldChannel.messages.fetch(oldProfile.profile_message_id);
+          await oldMessage.delete();
+        }
+      } catch (error) {
+        if (error.code !== 10003 && error.code !== 10008) {
+          console.error(`Não foi possível remover o perfil Tinder antigo de ${interaction.user.id}:`, error);
+          oldProfileWarning = " Não consegui apagar a publicação antiga; um administrador pode removê-la manualmente.";
+        }
+      }
+    }
+    await interaction.editReply(`Seu perfil foi publicado em <#${tinderProfileChannelId}>.${oldProfileWarning}`);
+  } catch (error) {
+    console.error(`Não foi possível publicar o perfil Tinder de ${interaction.user.id}:`, error);
+    await interaction.editReply(
+      "Não consegui publicar seu perfil. Verifique se o bot tem acesso ao canal de perfis e tente novamente."
+    );
+  }
+}
+
+async function removeTinderProfile(interaction) {
+  const profile = db.prepare(
+    "SELECT profile_channel_id, profile_message_id FROM tinder_profiles WHERE guild_id = ? AND user_id = ? AND active = 1"
+  ).get(interaction.guildId, interaction.user.id);
+  if (!profile) {
+    return interaction.update({ content: "Você não tem um perfil ativo para remover.", embeds: [], components: [] });
+  }
+
+  await interaction.deferUpdate();
+  try {
+    const channel = await client.channels.fetch(profile.profile_channel_id);
+    if (channel?.isTextBased()) {
+      const message = await channel.messages.fetch(profile.profile_message_id);
+      await message.delete();
+    }
+  } catch (error) {
+    if (error.code !== 10003 && error.code !== 10008) {
+      console.error(`Não foi possível remover a publicação Tinder de ${interaction.user.id}:`, error);
+      await interaction.editReply({
+        content: "Não consegui apagar a publicação do canal. Seu perfil continua ativo; confira as permissões e tente novamente.",
+        embeds: [],
+        components: []
+      });
+      return;
+    }
+  }
+  db.prepare(
+    "DELETE FROM tinder_profiles WHERE guild_id = ? AND user_id = ?"
+  ).run(interaction.guildId, interaction.user.id);
+  db.prepare(`
+    UPDATE tinder_match_requests SET status = 'cancelled'
+    WHERE guild_id = ? AND status IN ('pending', 'creating') AND (sender_id = ? OR recipient_id = ?)
+  `).run(interaction.guildId, interaction.user.id, interaction.user.id);
+  db.prepare(
+    "DELETE FROM tinder_swipes WHERE guild_id = ? AND swiper_id = ?"
+  ).run(interaction.guildId, interaction.user.id);
+  await interaction.editReply({ content: "Seu perfil foi removido.", embeds: [], components: [] });
+}
+
+async function handleTinderLike(interaction, targetId) {
+  if (!interaction.inGuild()) {
+    return interaction.reply({ content: "Matches só podem ser iniciados dentro do servidor.", ephemeral: true });
+  }
+  await interaction.deferReply({ ephemeral: true });
+
+  try {
+    if (targetId === interaction.user.id) {
+      return interaction.editReply("Você não pode dar match com seu próprio perfil.");
+    }
+    const requesterProfile = db.prepare(
+      "SELECT active FROM tinder_profiles WHERE guild_id = ? AND user_id = ?"
+    ).get(interaction.guildId, interaction.user.id);
+    if (!requesterProfile?.active) {
+      return interaction.editReply("Crie seu perfil pelo painel antes de dar match.");
+    }
+
+    const targetProfile = db.prepare(
+      "SELECT * FROM tinder_profiles WHERE guild_id = ? AND user_id = ? AND active = 1"
+    ).get(interaction.guildId, targetId);
+    if (!targetProfile || interaction.message.id !== targetProfile.profile_message_id) {
+      return interaction.editReply("Este perfil não está mais ativo.");
+    }
+
+    const previousSwipe = db.prepare(
+      "SELECT action FROM tinder_swipes WHERE guild_id = ? AND swiper_id = ? AND target_id = ?"
+    ).get(interaction.guildId, interaction.user.id, targetId);
+    if (previousSwipe?.action === "pass") {
+      return interaction.editReply("Você já passou este perfil.");
+    }
+
+    let request = db.prepare(`
+      SELECT id, status FROM tinder_match_requests
+      WHERE guild_id = ? AND sender_id = ? AND recipient_id = ?
+    `).get(interaction.guildId, interaction.user.id, targetId);
+    if (request && !["undeliverable", "cancelled"].includes(request.status)) {
+      const messages = {
+        pending: "Sua solicitação de match já foi enviada.",
+        creating: "A solicitação está sendo processada.",
+        accepted: "Vocês já deram match!",
+        declined: "Esta solicitação já foi recusada.",
+        cancelled: "Esta solicitação não está mais ativa."
+      };
+      return interaction.editReply(messages[request.status] || "Você já enviou uma solicitação para este perfil.");
+    }
+
+    db.prepare(`
+      INSERT INTO tinder_swipes (guild_id, swiper_id, target_id, action)
+      VALUES (?, ?, ?, 'like')
+      ON CONFLICT(guild_id, swiper_id, target_id) DO UPDATE SET action = 'like'
+    `).run(interaction.guildId, interaction.user.id, targetId);
+
+    if (request && ["undeliverable", "cancelled"].includes(request.status)) {
+      db.prepare(`
+        UPDATE tinder_match_requests SET status = 'pending',
+        request_channel_id = NULL, request_message_id = NULL, private_channel_id = NULL
+        WHERE id = ?
+      `).run(request.id);
+    } else {
+      const result = db.prepare(`
+        INSERT INTO tinder_match_requests (guild_id, sender_id, recipient_id)
+        VALUES (?, ?, ?)
+      `).run(interaction.guildId, interaction.user.id, targetId);
+      request = { id: Number(result.lastInsertRowid), status: "pending" };
+    }
+
+    try {
+      const targetUser = await client.users.fetch(targetId);
+      const requesterProfileCard = db.prepare(
+        "SELECT profile_channel_id, profile_message_id FROM tinder_profiles WHERE guild_id = ? AND user_id = ? AND active = 1"
+      ).get(interaction.guildId, interaction.user.id);
+      const profileUrl = requesterProfileCard
+        ? `https://discord.com/channels/${interaction.guildId}/${requesterProfileCard.profile_channel_id}/${requesterProfileCard.profile_message_id}`
+        : null;
+      const requesterName = interaction.member?.displayName ||
+        interaction.user.globalName ||
+        interaction.user.username;
+      const requestMessage = await targetUser.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xeb459e)
+            .setTitle("Você recebeu uma solicitação de match!")
+            .setDescription(`**${sanitizeTinderText(requesterName)}** quer dar match com você.`)
+            .addFields(profileUrl
+              ? { name: "Ver perfil", value: `[Abrir perfil](${profileUrl})` }
+              : { name: "Servidor", value: `Solicitação enviada em **${interaction.guild.name}**.` })
+            .setThumbnail(interaction.user.displayAvatarURL())
+        ],
+        components: [
+          new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId(`tinder:accept:${request.id}`)
+              .setLabel("Aceitar")
+              .setStyle(ButtonStyle.Success),
+            new ButtonBuilder()
+              .setCustomId(`tinder:decline:${request.id}`)
+              .setLabel("Recusar")
+              .setStyle(ButtonStyle.Danger)
+          )
+        ],
+        allowedMentions: { parse: [] }
+      });
+      db.prepare(`
+        UPDATE tinder_match_requests
+        SET request_channel_id = ?, request_message_id = ?
+        WHERE id = ?
+      `).run(requestMessage.channelId, requestMessage.id, request.id);
+      await interaction.editReply(`Solicitação enviada para **${sanitizeTinderText(targetUser.username)}** por DM.`);
+    } catch (error) {
+      db.prepare("UPDATE tinder_match_requests SET status = 'undeliverable' WHERE id = ?").run(request.id);
+      console.error(`Não foi possível enviar solicitação Tinder para ${targetId}:`, error);
+      await interaction.editReply("Não consegui enviar a solicitação por DM. A pessoa precisa permitir mensagens privadas para tentar novamente.");
+    }
+  } catch (error) {
+    console.error(`Erro ao processar match Tinder para ${interaction.user.id}:`, error);
+    await interaction.editReply("Não consegui processar o match. Tente novamente mais tarde.");
+  }
+}
+
+async function handleTinderPass(interaction, targetId) {
+  if (!interaction.inGuild()) {
+    return interaction.reply({ content: "Esta ação só pode ser usada no servidor.", ephemeral: true });
+  }
+  if (targetId === interaction.user.id) {
+    return interaction.reply({ content: "Você não pode passar seu próprio perfil.", ephemeral: true });
+  }
+  const activeProfile = db.prepare(
+    "SELECT active FROM tinder_profiles WHERE guild_id = ? AND user_id = ?"
+  ).get(interaction.guildId, interaction.user.id);
+  if (!activeProfile?.active) {
+    return interaction.reply({ content: "Crie seu perfil pelo painel antes de usar os perfis.", ephemeral: true });
+  }
+  const targetProfile = db.prepare(
+    "SELECT profile_message_id FROM tinder_profiles WHERE guild_id = ? AND user_id = ? AND active = 1"
+  ).get(interaction.guildId, targetId);
+  if (!targetProfile || interaction.message.id !== targetProfile.profile_message_id) {
+    return interaction.reply({ content: "Este perfil não está mais ativo.", ephemeral: true });
+  }
+  const existingRequest = db.prepare(`
+    SELECT status FROM tinder_match_requests
+    WHERE guild_id = ? AND sender_id = ? AND recipient_id = ?
+  `).get(interaction.guildId, interaction.user.id, targetId);
+  if (existingRequest) {
+    return interaction.reply({ content: "Você já enviou uma solicitação para este perfil.", ephemeral: true });
+  }
+  db.prepare(`
+    INSERT OR IGNORE INTO tinder_swipes (guild_id, swiper_id, target_id, action)
+    VALUES (?, ?, ?, 'pass')
+  `).run(interaction.guildId, interaction.user.id, targetId);
+  return interaction.reply({ content: "Perfil passado.", ephemeral: true });
+}
+
+async function showTinderMatches(interaction) {
+  if (!interaction.inGuild()) {
+    return interaction.reply({ content: "Esta ação só pode ser usada no servidor.", ephemeral: true });
+  }
+  const matches = db.prepare(`
+    SELECT id, sender_id, recipient_id, private_channel_id, created_at
+    FROM tinder_match_requests
+    WHERE guild_id = ? AND status = 'accepted' AND private_channel_id IS NOT NULL
+      AND (sender_id = ? OR recipient_id = ?)
+    ORDER BY id DESC LIMIT 20
+  `).all(interaction.guildId, interaction.user.id, interaction.user.id);
+  const seenChannels = new Set();
+  const lines = [];
+  for (const match of matches) {
+    if (seenChannels.has(match.private_channel_id)) continue;
+    seenChannels.add(match.private_channel_id);
+    const partnerId = match.sender_id === interaction.user.id ? match.recipient_id : match.sender_id;
+    lines.push(`<@${partnerId}> — <#${match.private_channel_id}>`);
+  }
+  return interaction.reply({
+    content: lines.length
+      ? `Seus matches recentes:\n${lines.join("\n")}`
+      : "Você ainda não tem matches aceitos.",
+    ephemeral: true,
+    allowedMentions: { parse: [] }
+  });
+}
+
+async function handleTinderRequestResponse(interaction, requestId, accept) {
+  if (!Number.isSafeInteger(requestId) || requestId < 1) {
+    return interaction.reply({ content: "Esta solicitação não é válida.", ephemeral: true });
+  }
+  const request = db.prepare(
+    "SELECT * FROM tinder_match_requests WHERE id = ?"
+  ).get(requestId);
+  if (!request || request.recipient_id !== interaction.user.id) {
+    return interaction.reply({ content: "Esta solicitação não é sua ou não está mais disponível.", ephemeral: true });
+  }
+  if (request.status === "accepted" && request.private_channel_id) {
+    return interaction.update({
+      content: `Vocês já deram match! A conversa está em <#${request.private_channel_id}>.`,
+      embeds: [],
+      components: []
+    });
+  }
+  if (request.status !== "pending") {
+    return interaction.update({
+      content: "Esta solicitação não está mais pendente.",
+      embeds: [],
+      components: []
+    });
+  }
+
+  if (accept) {
+    const reciprocalRequest = db.prepare(`
+      SELECT id, status, private_channel_id
+      FROM tinder_match_requests
+      WHERE guild_id = ? AND id != ?
+        AND sender_id = ? AND recipient_id = ?
+      LIMIT 1
+    `).get(request.guild_id, requestId, request.recipient_id, request.sender_id);
+    if (reciprocalRequest?.status === "accepted" && reciprocalRequest.private_channel_id) {
+      db.prepare(`
+        UPDATE tinder_match_requests SET status = 'accepted', private_channel_id = ?
+        WHERE id = ? AND status = 'pending'
+      `).run(reciprocalRequest.private_channel_id, requestId);
+      return interaction.update({
+        content: `Vocês já deram match! A conversa está em <#${reciprocalRequest.private_channel_id}>.`,
+        embeds: [],
+        components: []
+      });
+    }
+    if (reciprocalRequest?.status === "creating") {
+      return interaction.update({
+        content: "Esta conversa já está sendo criada. Confira seus matches em alguns instantes.",
+        embeds: [],
+        components: []
+      });
+    }
+  }
+
+  if (!accept) {
+    const result = db.prepare(`
+      UPDATE tinder_match_requests SET status = 'declined'
+      WHERE id = ? AND recipient_id = ? AND status = 'pending'
+    `).run(requestId, interaction.user.id);
+    if (!result.changes) {
+      return interaction.update({ content: "Esta solicitação já foi respondida.", embeds: [], components: [] });
+    }
+    return interaction.update({ content: "Solicitação recusada.", embeds: [], components: [] });
+  }
+
+  const result = db.prepare(`
+    UPDATE tinder_match_requests SET status = 'creating'
+    WHERE id = ? AND recipient_id = ? AND status = 'pending'
+  `).run(requestId, interaction.user.id);
+  if (!result.changes) {
+    return interaction.update({ content: "Esta solicitação já está sendo processada.", embeds: [], components: [] });
+  }
+  await interaction.deferUpdate();
+
+  let privateChannel;
+  try {
+    const guild = await client.guilds.fetch(request.guild_id);
+    await Promise.all([
+      guild.members.fetch(request.sender_id),
+      guild.members.fetch(request.recipient_id)
+    ]);
+    privateChannel = await guild.channels.create({
+      name: `match-${requestId}`,
+      type: ChannelType.GuildText,
+      topic: "Conversa privada entre os participantes de um match.",
+      permissionOverwrites: [
+        {
+          id: guild.roles.everyone.id,
+          deny: [PermissionFlagsBits.ViewChannel]
+        },
+        {
+          id: client.user.id,
+          allow: [
+            PermissionFlagsBits.ViewChannel,
+            PermissionFlagsBits.SendMessages,
+            PermissionFlagsBits.ReadMessageHistory,
+            PermissionFlagsBits.EmbedLinks,
+            PermissionFlagsBits.AttachFiles
+          ]
+        },
+        {
+          id: request.sender_id,
+          allow: [
+            PermissionFlagsBits.ViewChannel,
+            PermissionFlagsBits.SendMessages,
+            PermissionFlagsBits.ReadMessageHistory,
+            PermissionFlagsBits.EmbedLinks,
+            PermissionFlagsBits.AttachFiles
+          ]
+        },
+        {
+          id: request.recipient_id,
+          allow: [
+            PermissionFlagsBits.ViewChannel,
+            PermissionFlagsBits.SendMessages,
+            PermissionFlagsBits.ReadMessageHistory,
+            PermissionFlagsBits.EmbedLinks,
+            PermissionFlagsBits.AttachFiles
+          ]
+        }
+      ],
+      reason: `Match Tinder aceito (solicitação ${requestId})`
+    });
+  } catch (error) {
+    if (error.code === 10007) {
+      db.prepare("UPDATE tinder_match_requests SET status = 'cancelled' WHERE id = ? AND status = 'creating'").run(requestId);
+      await interaction.editReply({
+        content: "Um dos participantes não está mais no servidor; a solicitação foi cancelada.",
+        embeds: [],
+        components: []
+      });
+      return;
+    }
+    db.prepare("UPDATE tinder_match_requests SET status = 'pending' WHERE id = ? AND status = 'creating'").run(requestId);
+    console.error(`Não foi possível criar o canal privado do match ${requestId}:`, error);
+    await interaction.editReply({
+      content: "Não consegui criar o canal privado. Verifique se o bot tem a permissão **Gerenciar Canais** e tente aceitar novamente.",
+      components: interaction.message.components
+    });
+    return;
+  }
+
+  const acceptedRequest = db.prepare(`
+    UPDATE tinder_match_requests
+    SET status = 'accepted', private_channel_id = ?
+    WHERE id = ? AND status = 'creating'
+  `).run(privateChannel.id, requestId);
+  if (!acceptedRequest.changes) {
+    await privateChannel.delete("A solicitação foi cancelada durante a criação do canal.").catch(error => {
+      console.error(`Não foi possível remover o canal do match cancelado ${requestId}:`, error);
+    });
+    await interaction.editReply({
+      content: "A solicitação foi cancelada e nenhum canal de conversa foi mantido.",
+      embeds: [],
+      components: []
+    });
+    return;
+  }
+  db.prepare(`
+    UPDATE tinder_match_requests
+    SET status = 'accepted', private_channel_id = ?
+    WHERE guild_id = ? AND sender_id = ? AND recipient_id = ? AND status = 'pending'
+  `).run(privateChannel.id, request.guild_id, request.recipient_id, request.sender_id);
+
+  await privateChannel.send({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(0xeb459e)
+        .setTitle("Match aceito! 💞")
+        .setDescription(`<@${request.sender_id}> e <@${request.recipient_id}>, esta conversa é privada.`)
+    ],
+    allowedMentions: { parse: [] }
+  }).catch(error => {
+    console.error(`Não foi possível enviar a mensagem inicial no canal do match ${requestId}:`, error);
+  });
+
+  let senderNotificationWarning = "";
+  try {
+    const sender = await client.users.fetch(request.sender_id);
+    await sender.send(`Seu match foi aceito! A conversa privada está em <#${privateChannel.id}>.`);
+  } catch (error) {
+    console.error(`Não foi possível avisar o usuário ${request.sender_id} sobre o match ${requestId}:`, error);
+    senderNotificationWarning = " Não consegui avisar a outra pessoa por DM; ela ainda pode abrir o canal pela lista do servidor.";
+  }
+  await interaction.editReply({
+    content: `Vocês deram match! A conversa privada foi criada em <#${privateChannel.id}>.${senderNotificationWarning}`,
+    embeds: [],
+    components: []
+  });
+}
+
+async function handleTinderButton(interaction) {
+  const [, action, parameter] = interaction.customId.split(":");
+  if (action === "create") {
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`tinder:consent:${interaction.user.id}`)
+        .setLabel("Confirmo, continuar")
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId("tinder:cancel")
+        .setLabel("Cancelar")
+        .setStyle(ButtonStyle.Secondary)
+    );
+    return interaction.reply({
+      content: "Confirme que você tem **18 anos ou mais** e que autoriza publicar no canal de perfis sua foto/vídeo, bio, gênero, idade e cidade. Não envie conteúdo íntimo ou informações que não queira tornar públicas.",
+      components: [row],
+      ephemeral: true
+    });
+  }
+  if (action === "consent") {
+    if (parameter !== interaction.user.id) {
+      return interaction.reply({ content: "Somente quem iniciou o cadastro pode confirmar.", ephemeral: true });
+    }
+    return interaction.showModal(createTinderProfileModal());
+  }
+  if (action === "cancel") {
+    return interaction.update({ content: "Ação cancelada.", components: [] });
+  }
+  if (action === "delete") {
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("tinder:delete-confirm")
+        .setLabel("Sim, remover")
+        .setStyle(ButtonStyle.Danger),
+      new ButtonBuilder()
+        .setCustomId("tinder:cancel")
+        .setLabel("Cancelar")
+        .setStyle(ButtonStyle.Secondary)
+    );
+    return interaction.reply({
+      content: "Tem certeza de que deseja remover seu perfil público e cancelar solicitações pendentes?",
+      components: [row],
+      ephemeral: true
+    });
+  }
+  if (action === "delete-confirm") return removeTinderProfile(interaction);
+  if (action === "matches") return showTinderMatches(interaction);
+  if (action === "like") return handleTinderLike(interaction, parameter);
+  if (action === "pass") return handleTinderPass(interaction, parameter);
+  if (action === "accept" || action === "decline") {
+    return handleTinderRequestResponse(interaction, Number(parameter), action === "accept");
+  }
+  return interaction.reply({ content: "Esta ação do Tinder não é reconhecida.", ephemeral: true });
 }
 
 function isValidSocialUrl(value, host) {
@@ -1636,6 +2529,12 @@ client.on("interactionCreate", async interaction => {
       return await handleLiveStatusCommand(interaction);
     }
 
+    if (interaction.isChatInputCommand() && interaction.commandName === "tinder") {
+      if (interaction.options.getSubcommand() === "painel") {
+        return await handleTinderPanelCommand(interaction);
+      }
+    }
+
     if (interaction.isChatInputCommand() && interaction.commandName === "configurar-painel") {
       if (!interaction.inGuild() || !memberHasConfigRole(interaction.member)) {
         return interaction.reply({ content: "Somente membros com o cargo autorizado podem alterar as configurações.", ephemeral: true });
@@ -1653,6 +2552,10 @@ client.on("interactionCreate", async interaction => {
       await interaction.reply({ content: "Painel enviado.", ephemeral: true });
       await sendPanel(interaction.channel, interaction.guildId);
       return;
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith("tinder:")) {
+      return await handleTinderButton(interaction);
     }
 
     if (interaction.isButton() && interaction.customId === "open_publish") {
@@ -1723,6 +2626,10 @@ client.on("interactionCreate", async interaction => {
       await refreshGuildConfiguration(interaction.guildId);
       await interaction.editReply(createConfigDashboardPayload(interaction.guildId));
       return;
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId === "tinder:profile") {
+      return await handleTinderProfileSubmit(interaction);
     }
 
     if (interaction.isModalSubmit() && interaction.customId === "publish_modal") {

@@ -13,6 +13,7 @@
 - Ao iniciar, o bot entra sem áudio na call `1571359738682286161` e tenta reconectar automaticamente se for desconectado.
 - `/mute` silencia um membro no chat e na voz sem desconectá-lo, envia o motivo por DM, aplica o cargo de mute e registra motivo e vencimento; `/unmute` remove o mute antecipadamente.
 - Registra entradas de membros e criação de convites no canal `1571282224660357182`, incluindo o criador do convite quando identificável.
+- `/tinder painel` publica o painel de perfis 18+, solicitações de match por DM e conversas em canais privados.
 
 ## Instalação
 1. Instale Node.js 22 LTS ou 24 LTS.
@@ -20,7 +21,7 @@
 3. Crie um arquivo `.env` na pasta do projeto e preencha `DISCORD_TOKEN` e `GUILD_ID`. `POST_CHANNEL_ID` é opcional. O ID do aplicativo é obtido automaticamente do bot autenticado. Use somente um token recém-gerado; nunca compartilhe ou versione o arquivo `.env`.
 4. No Discord Developer Portal, ative **Message Content Intent** e **Server Members Intent** em Bot > Privileged Gateway Intents.
 5. Convide o bot com os escopos `bot` e `applications.commands`.
-6. Permissões recomendadas: View Channels, Send Messages, Embed Links, Attach Files, Read Message History, Connect, Mute Members, Manage Roles e Manage Server. Para `!emj`, o usuário e o bot também precisam de **Manage Expressions**.
+6. Permissões recomendadas: View Channels, Send Messages, Embed Links, Attach Files, Read Message History, Connect, Mute Members, Manage Roles, Manage Channels e Manage Server. Para `!emj`, o usuário e o bot também precisam de **Manage Expressions**.
 7. No terminal, dentro da pasta, execute:
    ```bash
    npm install
@@ -47,6 +48,13 @@
 - Os títulos usam os emojis personalizados do servidor.
 - O painel é editado a cada 5 segundos. O canal e a mensagem ficam salvos no SQLite para continuar após reinícios; use `/status` novamente para atualizar o banner ou mudar o canal.
 - O parâmetro `banner` aceita uma URL HTTPS. O bot precisa das permissões **View Channel**, **Send Messages**, **Embed Links** e **Read Message History** no canal.
+
+## Tinder
+- Um administrador usa `/tinder painel` para criar ou atualizar o painel; o canal onde os perfis são publicados é `1570582366630576220`.
+- O botão de cadastro pede confirmação de maioridade e consentimento antes de abrir o formulário. O perfil exige uma foto ou vídeo (até 25 MB), gênero, idade mínima de 18 anos e cidade; a bio é opcional.
+- Os perfis e a mídia são públicos nesse canal. Usuários podem dar match ou passar; um match gera uma solicitação privada por DM. Ao aceitar, o bot atualiza a solicitação e cria um canal visível apenas aos dois participantes e ao bot.
+- O botão do painel permite atualizar ou remover o perfil e consultar matches. Ao remover, o perfil público é apagado e solicitações pendentes são canceladas.
+- O bot precisa de **View Channel**, **Send Messages**, **Embed Links**, **Attach Files** e **Read Message History** no canal de perfis. Para criar conversas após um aceite, também precisa de **Manage Channels** e acesso ao servidor.
 
 ## Moderação
 - Moderadores com **Moderate Members** podem usar `/mute membro:<menção ou ID> tempo:<1h ou 2d> motivo:<texto>`. O limite continua sendo 28 dias.
