@@ -92,6 +92,20 @@ db.exec(`
     uses INTEGER NOT NULL,
     PRIMARY KEY (guild_id, invite_code)
   );
+  CREATE TABLE IF NOT EXISTS live_status_messages (
+    guild_id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    banner_url TEXT NOT NULL DEFAULT ''
+  );
+  CREATE TABLE IF NOT EXISTS guild_member_joins (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    joined_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_guild_member_joins_guild_time
+    ON guild_member_joins (guild_id, joined_at);
 `);
 
 const activeMuteColumns = db.pragma("table_info(active_mutes)");
@@ -116,6 +130,10 @@ const muteLogChannelId = "1571282224660357182";
 const maxMuteDurationMs = 28 * 24 * 60 * 60 * 1000;
 let voiceConnection;
 let voiceReconnectTimer;
+const liveStatusMessageCache = new Map();
+const previousVoiceCounts = new Map();
+let liveStatusUpdateRunning = false;
+let lastRecentJoinCleanupAt = 0;
 const buttonStyles = {
   Primary: ButtonStyle.Primary,
   Secondary: ButtonStyle.Secondary,
@@ -185,6 +203,20 @@ const commands = [
       .setDescription("Link do servidor para o botão Discord (padrão: convite configurado)")
       .setRequired(false)
       .setMaxLength(256)),
+  new SlashCommandBuilder()
+    .setName("status")
+    .setDescription("Cria ou atualiza o painel de atividade das calls")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addChannelOption(option => option
+      .setName("canal")
+      .setDescription("Canal de destino (padrão: canal atual)")
+      .setRequired(false)
+      .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement))
+    .addStringOption(option => option
+      .setName("banner")
+      .setDescription("URL HTTPS opcional da imagem do painel")
+      .setRequired(false)
+      .setMaxLength(1000)),
   new SlashCommandBuilder()
     .setName("mute")
     .setDescription("Silencia um membro temporariamente sem removê-lo da call")
@@ -372,6 +404,14 @@ async function initializeInviteSnapshots() {
 }
 
 async function handleGuildMemberJoin(member) {
+  const joinedAt = Math.floor((member.joinedTimestamp || Date.now()) / 1000);
+  db.prepare(`
+    INSERT INTO guild_member_joins (guild_id, user_id, joined_at)
+    VALUES (?, ?, ?)
+  `).run(member.guild.id, member.id, joinedAt);
+  db.prepare("DELETE FROM guild_member_joins WHERE guild_id = ? AND joined_at < ?")
+    .run(member.guild.id, joinedAt - 3_600);
+
   let usedInvite = null;
   let inviter = null;
   try {
@@ -1017,6 +1057,210 @@ async function handleEmbedCommand(interaction) {
   }
 }
 
+function getLiveVoiceMetrics(guild) {
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (nowSeconds - lastRecentJoinCleanupAt >= 3_600) {
+    db.prepare("DELETE FROM guild_member_joins WHERE joined_at < ?").run(nowSeconds - 3_600);
+    lastRecentJoinCleanupAt = nowSeconds;
+  }
+
+  const metrics = {
+    total: 0,
+    muted: 0,
+    deafened: 0,
+    streaming: 0,
+    camera: 0,
+    recentJoins: db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM guild_member_joins
+      WHERE guild_id = ? AND joined_at >= ?
+    `).get(guild.id, nowSeconds - 3_600).count,
+    topChannel: null
+  };
+
+  for (const channel of guild.channels.cache.values()) {
+    if (!channel.isVoiceBased()) continue;
+
+    const members = [...channel.members.values()].filter(member => !member.user.bot);
+    metrics.total += members.length;
+    if (!metrics.topChannel || members.length > metrics.topChannel.count) {
+      if (members.length > 0) {
+        metrics.topChannel = { id: channel.id, count: members.length };
+      }
+    }
+
+    for (const member of members) {
+      const voice = member.voice;
+      if (voice.selfMute || voice.serverMute) metrics.muted += 1;
+      if (voice.selfDeaf || voice.serverDeaf) metrics.deafened += 1;
+      if (voice.streaming) metrics.streaming += 1;
+      if (voice.selfVideo) metrics.camera += 1;
+    }
+  }
+
+  return metrics;
+}
+
+function createLiveStatusEmbed(guild, bannerUrl) {
+  const metrics = getLiveVoiceMetrics(guild);
+  const previousCount = previousVoiceCounts.get(guild.id);
+  previousVoiceCounts.set(guild.id, metrics.total);
+
+  const embed = new EmbedBuilder()
+    .setColor(0x9b59b6)
+    .setTitle(`💜 Temos ${metrics.total} membros em call!`)
+    .setDescription("Atividade atualizada automaticamente a cada 5 segundos.")
+    .addFields(
+      {
+        name: "🏆 TOP Call",
+        value: metrics.topChannel
+          ? `<#${metrics.topChannel.id}> — ${metrics.topChannel.count} membros`
+          : "Nenhum membro em call no momento.",
+        inline: false
+      },
+      {
+        name: "🎙️ Atividade de voz",
+        value: `**Membros em call:** ${previousCount === undefined ? metrics.total : `${previousCount} → ${metrics.total}`}\n` +
+          `**Mutados:** ${metrics.muted} • **Surdos:** ${metrics.deafened} • **Sem mute:** ${metrics.total - metrics.muted}`,
+        inline: false
+      },
+      {
+        name: "📹 Câmera e transmissão",
+        value: `**Transmitindo tela:** ${metrics.streaming} • **Câmera ligada:** ${metrics.camera}`,
+        inline: true
+      },
+      {
+        name: "👥 Servidor",
+        value: `${guild.memberCount} membros`,
+        inline: true
+      },
+      {
+        name: "📈 Novos membros",
+        value: `${metrics.recentJoins} na última hora`,
+        inline: true
+      }
+    )
+    .setFooter({ text: `Atualizado <t:${Math.floor(Date.now() / 1000)}:R>` });
+
+  if (bannerUrl) embed.setImage(bannerUrl);
+  return embed;
+}
+
+async function handleLiveStatusCommand(interaction) {
+  if (!interaction.inGuild()) {
+    return interaction.reply({ content: "Este comando só pode ser usado em um servidor.", ephemeral: true });
+  }
+  if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
+    return interaction.reply({ content: "Somente administradores podem configurar o status.", ephemeral: true });
+  }
+
+  const channel = interaction.options.getChannel("canal") || interaction.channel;
+  const requestedBanner = interaction.options.getString("banner")?.trim() || "";
+  if (!channel?.isTextBased() || typeof channel.send !== "function") {
+    return interaction.reply({ content: "Escolha um canal de texto válido.", ephemeral: true });
+  }
+  if (requestedBanner && !isValidHttpsUrl(requestedBanner)) {
+    return interaction.reply({ content: "O banner precisa ser uma URL HTTPS válida.", ephemeral: true });
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+  try {
+    const guildId = interaction.guildId;
+    const existing = db.prepare(
+      "SELECT channel_id, message_id, banner_url FROM live_status_messages WHERE guild_id = ?"
+    ).get(guildId);
+    const bannerUrl = requestedBanner || existing?.banner_url || "";
+    let message = null;
+
+    if (existing?.channel_id === channel.id) {
+      try {
+        message = liveStatusMessageCache.get(guildId) ||
+          await channel.messages.fetch(existing.message_id);
+      } catch (error) {
+        if (error.code !== 10008) throw error;
+        liveStatusMessageCache.delete(guildId);
+      }
+    }
+
+    const payload = {
+      embeds: [createLiveStatusEmbed(interaction.guild, bannerUrl)],
+      allowedMentions: { parse: [] }
+    };
+    if (message) {
+      await message.edit(payload);
+    } else {
+      message = await channel.send(payload);
+    }
+
+    db.prepare(`
+      INSERT INTO live_status_messages (guild_id, channel_id, message_id, banner_url)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(guild_id) DO UPDATE SET
+        channel_id = excluded.channel_id,
+        message_id = excluded.message_id,
+        banner_url = excluded.banner_url
+    `).run(guildId, channel.id, message.id, bannerUrl);
+    liveStatusMessageCache.set(guildId, message);
+
+    let previousMessageWarning = "";
+    if (existing && existing.channel_id !== channel.id) {
+      try {
+        const oldChannel = await client.channels.fetch(existing.channel_id);
+        if (oldChannel?.isTextBased()) {
+          const oldMessage = await oldChannel.messages.fetch(existing.message_id);
+          await oldMessage.delete();
+        }
+      } catch (error) {
+        if (error.code !== 10003 && error.code !== 10008) {
+          console.error(`Não foi possível remover o status antigo ${existing.message_id}:`, error);
+          previousMessageWarning = " Não consegui apagar a mensagem antiga; ela pode ser removida manualmente.";
+        }
+      }
+    }
+
+    await interaction.editReply(`Status ativo em <#${channel.id}> e atualizado a cada 5 segundos.${previousMessageWarning}`);
+  } catch (error) {
+    console.error(`Não foi possível configurar o status no servidor ${interaction.guildId}:`, error);
+    await interaction.editReply("Não consegui criar ou atualizar o status. Verifique se o bot pode ver o canal, enviar mensagens e incorporar links.");
+  }
+}
+
+async function refreshLiveStatusMessages() {
+  const statuses = db.prepare(
+    "SELECT guild_id, channel_id, message_id, banner_url FROM live_status_messages"
+  ).all();
+
+  for (const status of statuses) {
+    const guild = client.guilds.cache.get(status.guild_id);
+    if (!guild) continue;
+
+    try {
+      let message = liveStatusMessageCache.get(status.guild_id);
+      if (!message) {
+        const channel = await client.channels.fetch(status.channel_id);
+        if (!channel?.isTextBased() || typeof channel.messages?.fetch !== "function") {
+          throw new Error(`Canal de status indisponível: ${status.channel_id}`);
+        }
+        message = await channel.messages.fetch(status.message_id);
+        liveStatusMessageCache.set(status.guild_id, message);
+      }
+
+      await message.edit({
+        embeds: [createLiveStatusEmbed(guild, status.banner_url)],
+        allowedMentions: { parse: [] }
+      });
+    } catch (error) {
+      if (error.code === 10003 || error.code === 10008) {
+        console.warn(`Mensagem de status não encontrada; removendo a configuração do servidor ${status.guild_id}.`);
+        liveStatusMessageCache.delete(status.guild_id);
+        db.prepare("DELETE FROM live_status_messages WHERE guild_id = ?").run(status.guild_id);
+      } else {
+        console.error(`Não foi possível atualizar o status do servidor ${status.guild_id}:`, error);
+      }
+    }
+  }
+}
+
 function isValidSocialUrl(value, host) {
   if (!value) return true;
   try {
@@ -1345,6 +1589,19 @@ client.once("ready", async () => {
   if (existingPosts.length) {
     console.log(`Botões atualizados em ${existingPosts.length} publicações.`);
   }
+
+  const updateLiveStatuses = () => {
+    if (liveStatusUpdateRunning) return;
+    liveStatusUpdateRunning = true;
+    refreshLiveStatusMessages()
+      .catch(error => console.error("Erro ao atualizar os status de voz:", error))
+      .finally(() => {
+        liveStatusUpdateRunning = false;
+      });
+  };
+  updateLiveStatuses();
+  const liveStatusTimer = setInterval(updateLiveStatuses, 5_000);
+  liveStatusTimer.unref();
 });
 
 client.on("guildMemberAdd", member => {
@@ -1372,6 +1629,10 @@ client.on("interactionCreate", async interaction => {
 
     if (interaction.isChatInputCommand() && interaction.commandName === "embed") {
       return await handleEmbedCommand(interaction);
+    }
+
+    if (interaction.isChatInputCommand() && interaction.commandName === "status") {
+      return await handleLiveStatusCommand(interaction);
     }
 
     if (interaction.isChatInputCommand() && interaction.commandName === "configurar-painel") {

@@ -41,6 +41,12 @@
 - Todo embed inclui um botão **Discord** com o emoji do servidor e o convite `https://discord.gg/KY4AEkxEeT`; a opção `convite` pode substituir o link nesse envio.
 - O bot precisa das permissões **View Channel**, **Send Messages** e **Embed Links** no canal de destino.
 
+## Status das calls
+- Administradores usam `/status` para criar ou atualizar um painel de voz; ele pode ser enviado no canal atual ou em um canal escolhido.
+- O painel mostra membros humanos em call, a call mais cheia, pessoas mutadas ou surdas, câmeras ligadas, transmissões de tela, entradas na última hora e o total de membros do servidor. A contagem de entradas começa após a atualização do bot.
+- O painel é editado a cada 5 segundos. O canal e a mensagem ficam salvos no SQLite para continuar após reinícios; use `/status` novamente para atualizar o banner ou mudar o canal.
+- O parâmetro `banner` aceita uma URL HTTPS. O bot precisa das permissões **View Channel**, **Send Messages**, **Embed Links** e **Read Message History** no canal.
+
 ## Moderação
 - Moderadores com **Moderate Members** podem usar `/mute membro:<menção ou ID> tempo:<1h ou 2d> motivo:<texto>`. O limite continua sendo 28 dias.
 - O bot aplica mute de voz do servidor sem desconectar a pessoa, adiciona o cargo `1571368553926369361`, envia o motivo e o vencimento por DM e registra a ação no canal `1571282224660357182`.
