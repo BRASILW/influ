@@ -1622,6 +1622,42 @@ function createTinderProfileButtons(userId) {
   );
 }
 
+async function refreshTinderProfiles() {
+  const profiles = db.prepare(
+    "SELECT * FROM tinder_profiles WHERE active = 1"
+  ).all();
+
+  for (const profile of profiles) {
+    try {
+      const channel = await client.channels.fetch(profile.profile_channel_id);
+      if (!channel?.isTextBased()) throw new Error("Canal do perfil indisponível.");
+      const message = await channel.messages.fetch(profile.profile_message_id);
+      if (message.flags.has(MessageFlags.IsComponentsV2)) continue;
+
+      const media = message.attachments.find(attachment => attachment.name === profile.media_name) ||
+        message.attachments.first();
+      if (!media) throw new Error("Mídia do perfil não encontrada na mensagem.");
+
+      const oldAuthor = message.embeds[0]?.author;
+      const displayName = oldAuthor?.name || profile.user_id;
+      await message.edit({
+        flags: MessageFlags.IsComponentsV2,
+        content: null,
+        embeds: [],
+        components: createTinderProfileComponents(
+          { ...profile, media_name: media.name },
+          displayName,
+          profile.user_id
+        ),
+        attachments: [...message.attachments.values()],
+        allowedMentions: { parse: [] }
+      });
+    } catch (error) {
+      console.error(`Não foi possível atualizar o perfil Tinder ${profile.user_id}:`, error.message);
+    }
+  }
+}
+
 async function handleTinderProfileSubmit(interaction) {
   if (!interaction.inGuild()) {
     return interaction.reply({ content: "O perfil só pode ser criado dentro do servidor.", ephemeral: true });
@@ -2550,6 +2586,8 @@ client.once("ready", async () => {
   if (existingPosts.length) {
     console.log(`Botões atualizados em ${existingPosts.length} publicações.`);
   }
+
+  await refreshTinderProfiles();
 
   const updateLiveStatuses = () => {
     if (liveStatusUpdateRunning) return;
