@@ -1351,7 +1351,7 @@ function createTinderPanelPayload(guildId) {
       "Ao continuar, você confirma que tem 18 anos ou mais e autoriza a publicação das informações e da mídia do perfil.")
     .addFields({
       name: "Como funciona",
-      value: "Veja os perfis, escolha **Dar match** e aguarde a resposta por DM. Matches aceitos ganham um canal privado no servidor."
+      value: "Veja os perfis, escolha **Metch** e aguarde a resposta por DM. Matches aceitos ganham um canal privado no servidor."
     })
     .setFooter({ text: "Somente maiores de 18 anos. Não publique informações que não queira compartilhar." });
 
@@ -1596,7 +1596,7 @@ function createTinderProfileEmbed(profile, displayName, avatarUrl) {
       { name: "Gênero", value: profile.gender, inline: true },
       { name: "Cidade", value: profile.city, inline: true }
     )
-    .setFooter({ text: "Perfil 18+ • Use os botões para dar match ou passar." });
+    .setFooter({ text: "Perfil 18+ • Use os botões para Metch ou passar." });
 
   if (profile.media_type.startsWith("image/")) {
     embed.setImage(`attachment://${profile.media_name}`);
@@ -1608,9 +1608,9 @@ function createTinderProfileButtons(userId) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`tinder:like:${userId}`)
-      .setLabel("Dar match")
-      .setEmoji("❤️")
-      .setStyle(ButtonStyle.Success),
+      .setLabel("Metch")
+      .setEmoji({ name: "1327037490477010984", id: "1571330274531213402", animated: true })
+      .setStyle(ButtonStyle.Danger),
     new ButtonBuilder()
       .setCustomId(`tinder:pass:${userId}`)
       .setLabel("Passar")
