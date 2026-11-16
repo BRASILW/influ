@@ -22,6 +22,23 @@ const hourlyRoleMentionTargets = [
   { taskKey: "hourly-role-mention-1571341192778616974", channelId: "1571341192778616974", roleId: "1570576646468276336" }
 ];
 const hourlyRoleMentionIntervalMs = 60 * 60 * 1000;
+const statusTimeZone = "America/Sao_Paulo";
+const statusDateFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: statusTimeZone,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit"
+});
+const statusDateTimeFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: statusTimeZone,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hourCycle: "h23"
+});
 const maxTinderMediaSize = 25 * 1024 * 1024;
 const tinderGenders = ["Homem", "Mulher", "Não binário", "Outro", "Prefiro não informar"];
 for (const key of required) {
@@ -664,14 +681,47 @@ async function initializeInviteSnapshots() {
   }
 }
 
+function getLocalDayStartSeconds(timestampMs = Date.now()) {
+  const dateParts = Object.fromEntries(
+    statusDateFormatter.formatToParts(new Date(timestampMs))
+      .filter(part => part.type !== "literal")
+      .map(part => [part.type, Number(part.value)])
+  );
+  const localMidnightAsUtcMs = Date.UTC(dateParts.year, dateParts.month - 1, dateParts.day);
+  let startOfDayMs = localMidnightAsUtcMs;
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const timeParts = Object.fromEntries(
+      statusDateTimeFormatter.formatToParts(new Date(startOfDayMs))
+        .filter(part => part.type !== "literal")
+        .map(part => [part.type, Number(part.value)])
+    );
+    const representedLocalTimeMs = Date.UTC(
+      timeParts.year,
+      timeParts.month - 1,
+      timeParts.day,
+      timeParts.hour,
+      timeParts.minute,
+      timeParts.second
+    );
+    const offsetMs = representedLocalTimeMs - startOfDayMs;
+    const adjustedStartOfDayMs = localMidnightAsUtcMs - offsetMs;
+    if (adjustedStartOfDayMs === startOfDayMs) break;
+    startOfDayMs = adjustedStartOfDayMs;
+  }
+
+  return Math.floor(startOfDayMs / 1000);
+}
+
 async function handleGuildMemberJoin(member) {
   const joinedAt = Math.floor((member.joinedTimestamp || Date.now()) / 1000);
+  const todayStart = getLocalDayStartSeconds(joinedAt * 1000);
   db.prepare(`
     INSERT INTO guild_member_joins (guild_id, user_id, joined_at)
     VALUES (?, ?, ?)
   `).run(member.guild.id, member.id, joinedAt);
   db.prepare("DELETE FROM guild_member_joins WHERE guild_id = ? AND joined_at < ?")
-    .run(member.guild.id, joinedAt - 3_600);
+    .run(member.guild.id, todayStart);
 
   let usedInvite = null;
   let inviter = null;
@@ -1734,8 +1784,9 @@ async function handleEmbedCommand(interaction) {
 
 function getLiveVoiceMetrics(guild) {
   const nowSeconds = Math.floor(Date.now() / 1000);
+  const todayStart = getLocalDayStartSeconds();
   if (nowSeconds - lastRecentJoinCleanupAt >= 3_600) {
-    db.prepare("DELETE FROM guild_member_joins WHERE joined_at < ?").run(nowSeconds - 3_600);
+    db.prepare("DELETE FROM guild_member_joins WHERE joined_at < ?").run(todayStart);
     lastRecentJoinCleanupAt = nowSeconds;
   }
 
@@ -1750,6 +1801,11 @@ function getLiveVoiceMetrics(guild) {
       FROM guild_member_joins
       WHERE guild_id = ? AND joined_at >= ?
     `).get(guild.id, nowSeconds - 3_600).count,
+    todayJoins: db.prepare(`
+      SELECT COUNT(DISTINCT user_id) AS count
+      FROM guild_member_joins
+      WHERE guild_id = ? AND joined_at >= ?
+    `).get(guild.id, todayStart).count,
     topChannel: null
   };
 
@@ -1813,6 +1869,11 @@ function createLiveStatusEmbed(guild, bannerUrl) {
       {
         name: "<a:012Blue_Stars2:1571656389346992270> Novos membros",
         value: `${metrics.recentJoins} na última hora`,
+        inline: true
+      },
+      {
+        name: "<:Usurio:1571330785422606396> Entraram hoje",
+        value: `${metrics.todayJoins} desde 00:00 (horário de Brasília)`,
         inline: true
       }
     )
