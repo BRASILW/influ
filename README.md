@@ -69,7 +69,7 @@
 
 ## Verificação da tag do servidor
 - Administradores usam `/verificacao-tag painel tag:RFF` para criar ou atualizar o painel. `cargo` e `canal` são opcionais; por padrão, o cargo é `1570583048569888889` e o painel vai para o canal atual.
-- O botão **Verificar** confere se a tag configurada está ativa no perfil do Discord e concede o cargo escolhido.
+- O botão **Verificar** confere se a tag configurada (por exemplo, `RFF`) está ativa e pertence a este servidor no perfil do Discord; a tag do servidor é distinta do cargo concedido.
 - O bot verifica novamente quem recebeu o cargo a cada 5 minutos e também em atualizações do membro. Se a tag for removida ou desativada, o cargo é retirado.
 - Tentativas, concessões e remoções são registradas em vermelho no canal `1571686069819285504`.
 - O bot precisa de **Manage Roles**, e seu cargo mais alto deve estar acima do cargo configurado. O cargo precisa ser um cargo normal, não gerenciado por integração.

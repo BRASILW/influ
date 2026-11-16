@@ -637,9 +637,10 @@ function canModerateMember(target, moderator, botMember, guild) {
     target.roles.highest.comparePositionTo(moderator.roles.highest) < 0;
 }
 
-function userHasServerTag(user, requiredTag) {
+function userHasServerTag(user, requiredTag, guildId) {
   const primaryGuild = user.primaryGuild;
-  return primaryGuild?.identityEnabled === true &&
+  return primaryGuild?.identityGuildId === guildId &&
+    primaryGuild.identityEnabled === true &&
     primaryGuild.tag?.toLocaleUpperCase("en-US") === requiredTag;
 }
 
@@ -843,8 +844,8 @@ async function handleServerTagVerification(interaction) {
       client.users.fetch(interaction.user.id, { force: true })
     ]);
 
-    if (!userHasServerTag(user, config.required_tag) &&
-        !userHasServerTag(interaction.user, config.required_tag)) {
+    if (!userHasServerTag(user, config.required_tag, interaction.guildId) &&
+        !userHasServerTag(interaction.user, config.required_tag, interaction.guildId)) {
       if (member.roles.cache.has(role.id)) {
         await member.roles.remove(role, `Tag ${config.required_tag} não está ativa.`);
         db.prepare("DELETE FROM server_tag_verifications WHERE guild_id = ? AND user_id = ?")
@@ -919,8 +920,8 @@ async function syncServerTagRole(member, config) {
   }
 
   const user = await client.users.fetch(member.id, { force: true });
-  if (userHasServerTag(user, config.required_tag) ||
-      userHasServerTag(member.user, config.required_tag)) {
+  if (userHasServerTag(user, config.required_tag, member.guild.id) ||
+      userHasServerTag(member.user, config.required_tag, member.guild.id)) {
     db.prepare("INSERT OR IGNORE INTO server_tag_verifications (guild_id, user_id) VALUES (?, ?)")
       .run(member.guild.id, member.id);
     return;
