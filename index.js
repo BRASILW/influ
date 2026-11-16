@@ -318,8 +318,8 @@ const commands = [
         .setDescription("Cria ou atualiza o painel de verificação")
         .addStringOption(option => option
           .setName("tag")
-          .setDescription("Tag do servidor exigida, por exemplo RFF")
-          .setRequired(true)
+          .setDescription("Texto da tag no perfil do Discord (padrão: RFF; não é o cargo)")
+          .setRequired(false)
           .setMaxLength(4))
         .addRoleOption(option => option
           .setName("cargo")
@@ -718,7 +718,9 @@ async function handleServerTagPanelCommand(interaction) {
     });
   }
 
-  const requiredTag = interaction.options.getString("tag", true).trim().toLocaleUpperCase("en-US");
+  const requiredTag = (interaction.options.getString("tag") || "RFF")
+    .trim()
+    .toLocaleUpperCase("en-US");
   if (!/^[A-Z0-9]{1,4}$/.test(requiredTag)) {
     return interaction.reply({
       content: "Informe uma tag válida com 1 a 4 letras ou números, por exemplo `RFF`.",

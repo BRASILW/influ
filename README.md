@@ -68,7 +68,7 @@
 - O bot precisa das permissões **Mute Members** e **Manage Roles**; moderadores precisam de **Moderate Members**.
 
 ## Verificação da tag do servidor
-- Administradores usam `/verificacao-tag painel tag:RFF` para criar ou atualizar o painel. `cargo` e `canal` são opcionais; por padrão, o cargo é `1570583048569888889` e o painel vai para o canal atual.
+- Administradores usam `/verificacao-tag painel` para criar ou atualizar o painel. A tag padrão é `RFF`; `tag` aceita o texto da tag do perfil (não é cargo nem ID), e `cargo`/`canal` são opcionais. Por padrão, o cargo é `1570583048569888889` e o painel vai para o canal atual.
 - O botão **Verificar** confere se a tag configurada (por exemplo, `RFF`) está ativa e pertence a este servidor no perfil do Discord; a tag do servidor é distinta do cargo concedido.
 - O bot verifica novamente quem recebeu o cargo a cada 5 minutos e também em atualizações do membro. Se a tag for removida ou desativada, o cargo é retirado.
 - Tentativas, concessões e remoções são registradas em vermelho no canal `1571686069819285504`.
