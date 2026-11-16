@@ -161,7 +161,12 @@ db.exec(`
     channel_id TEXT NOT NULL,
     message_id TEXT NOT NULL,
     required_tag TEXT NOT NULL,
-    role_id TEXT NOT NULL
+    role_id TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    color INTEGER NOT NULL DEFAULT 5793266,
+    banner_url TEXT NOT NULL DEFAULT '',
+    thumbnail_url TEXT NOT NULL DEFAULT ''
   );
   CREATE TABLE IF NOT EXISTS server_tag_verifications (
     guild_id TEXT NOT NULL,
@@ -178,6 +183,19 @@ if (!activeMuteColumns.some(column => column.name === "voice_mute_added_by_bot")
 const postColumns = db.pragma("table_info(posts)");
 if (!postColumns.some(column => column.name === "discord_nick")) {
   db.exec("ALTER TABLE posts ADD COLUMN discord_nick TEXT NOT NULL DEFAULT ''");
+}
+
+const serverTagPanelColumns = db.pragma("table_info(server_tag_panels)");
+for (const [name, definition] of [
+  ["title", "TEXT NOT NULL DEFAULT ''"],
+  ["description", "TEXT NOT NULL DEFAULT ''"],
+  ["color", "INTEGER NOT NULL DEFAULT 5793266"],
+  ["banner_url", "TEXT NOT NULL DEFAULT ''"],
+  ["thumbnail_url", "TEXT NOT NULL DEFAULT ''"]
+]) {
+  if (!serverTagPanelColumns.some(column => column.name === name)) {
+    db.exec(`ALTER TABLE server_tag_panels ADD COLUMN ${name} ${definition}`);
+  }
 }
 
 const defaultPanelTitle = "Painel de Influenciadores";
@@ -329,7 +347,32 @@ const commands = [
           .setName("canal")
           .setDescription("Canal do painel (padrão: canal atual)")
           .setRequired(false)
-          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement))),
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement))
+          .addStringOption(option => option
+            .setName("titulo")
+            .setDescription("Título do painel")
+            .setRequired(false)
+            .setMaxLength(256))
+          .addStringOption(option => option
+            .setName("descricao")
+            .setDescription("Descrição do painel")
+            .setRequired(false)
+            .setMaxLength(4000))
+          .addStringOption(option => option
+            .setName("banner")
+            .setDescription("URL HTTPS do banner; use remover para limpar")
+            .setRequired(false)
+            .setMaxLength(1000))
+          .addStringOption(option => option
+            .setName("thumbnail")
+            .setDescription("URL HTTPS da thumbnail; use remover para limpar")
+            .setRequired(false)
+            .setMaxLength(1000))
+          .addStringOption(option => option
+            .setName("cor")
+            .setDescription("Cor hexadecimal, por exemplo #E74C3C")
+            .setRequired(false)
+            .setMaxLength(7))),
   new SlashCommandBuilder()
     .setName("mute")
     .setDescription("Silencia um membro temporariamente sem removê-lo da call")
@@ -637,11 +680,38 @@ function canModerateMember(target, moderator, botMember, guild) {
     target.roles.highest.comparePositionTo(moderator.roles.highest) < 0;
 }
 
-function userHasServerTag(user, requiredTag, guildId) {
-  const primaryGuild = user.primaryGuild;
+function userHasServerTag(primaryGuild, requiredTag, guildId) {
   return primaryGuild?.identityGuildId === guildId &&
     primaryGuild.identityEnabled === true &&
     primaryGuild.tag?.toLocaleUpperCase("en-US") === requiredTag;
+}
+
+async function fetchUserPrimaryGuild(userId) {
+  const user = await client.rest.get(Routes.user(userId));
+  const primaryGuild = user.primary_guild;
+  return primaryGuild
+    ? {
+        identityGuildId: primaryGuild.identity_guild_id,
+        identityEnabled: primaryGuild.identity_enabled,
+        tag: primaryGuild.tag
+      }
+    : null;
+}
+
+function getServerTagPanelImage(value, currentValue, label) {
+  if (value === null) return currentValue || "";
+  if (value.trim().toLocaleLowerCase("pt-BR") === "remover") return "";
+
+  let url;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    throw new Error(`Informe uma URL HTTPS válida para ${label}, ou use \`remover\` para limpar.`);
+  }
+  if (url.protocol !== "https:") {
+    throw new Error(`A URL de ${label} precisa começar com HTTPS.`);
+  }
+  return url.toString();
 }
 
 async function getServerTagRole(guild, roleId) {
@@ -662,14 +732,15 @@ async function getServerTagRole(guild, roleId) {
   return role;
 }
 
-function createServerTagPanelPayload(guildId, requiredTag, roleId) {
+function createServerTagPanelPayload(guildId, requiredTag, roleId, settings) {
   const embed = new EmbedBuilder()
-    .setColor(0x5865f2)
-    .setTitle(`Verificação da tag ${requiredTag}`)
-    .setDescription(
+    .setColor(settings.color)
+    .setTitle(settings.title || `Verificação da tag ${requiredTag}`)
+    .setDescription(settings.description ||
       `Clique em **Verificar** para conferir se a tag **${requiredTag}** está ativa no seu perfil do Discord.\n` +
-      `Quem estiver com a tag recebe <@&${roleId}>. Se retirar a tag, o cargo será removido automaticamente.`
-    );
+      `Quem estiver com a tag recebe <@&${roleId}>. Se retirar a tag, o cargo será removido automaticamente.`);
+  if (settings.bannerUrl) embed.setImage(settings.bannerUrl);
+  if (settings.thumbnailUrl) embed.setThumbnail(settings.thumbnailUrl);
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`server-tag:verify:${guildId}`)
@@ -718,7 +789,11 @@ async function handleServerTagPanelCommand(interaction) {
     });
   }
 
-  const requiredTag = (interaction.options.getString("tag") || "RFF")
+  const existing = db.prepare(
+    "SELECT channel_id, message_id, required_tag, role_id, title, description, color, banner_url, thumbnail_url " +
+    "FROM server_tag_panels WHERE guild_id = ?"
+  ).get(interaction.guildId);
+  const requiredTag = (interaction.options.getString("tag") || existing?.required_tag || "RFF")
     .trim()
     .toLocaleUpperCase("en-US");
   if (!/^[A-Z0-9]{1,4}$/.test(requiredTag)) {
@@ -735,7 +810,42 @@ async function handleServerTagPanelCommand(interaction) {
   }
 
   const selectedRole = interaction.options.getRole("cargo");
-  const roleId = selectedRole?.id || defaultServerTagRoleId;
+  const roleId = selectedRole?.id || existing?.role_id || defaultServerTagRoleId;
+  const titleOption = interaction.options.getString("titulo");
+  const descriptionOption = interaction.options.getString("descricao");
+  const title = titleOption === null
+    ? existing?.title || ""
+    : titleOption.trim().toLocaleLowerCase("pt-BR") === "remover" ? "" : titleOption.trim();
+  const description = descriptionOption === null
+    ? existing?.description || ""
+    : descriptionOption.trim().toLocaleLowerCase("pt-BR") === "remover" ? "" : descriptionOption.trim();
+  let bannerUrl;
+  let thumbnailUrl;
+  try {
+    bannerUrl = getServerTagPanelImage(
+      interaction.options.getString("banner"),
+      existing?.banner_url,
+      "banner"
+    );
+    thumbnailUrl = getServerTagPanelImage(
+      interaction.options.getString("thumbnail"),
+      existing?.thumbnail_url,
+      "thumbnail"
+    );
+  } catch (error) {
+    return interaction.reply({ content: error.message, ephemeral: true });
+  }
+  const colorOption = interaction.options.getString("cor");
+  let color = existing?.color ?? 0x5865f2;
+  if (colorOption !== null) {
+    if (!/^#?[0-9A-Fa-f]{6}$/.test(colorOption.trim())) {
+      return interaction.reply({
+        content: "Informe uma cor hexadecimal de 6 dígitos, por exemplo `#E74C3C`.",
+        ephemeral: true
+      });
+    }
+    color = Number.parseInt(colorOption.trim().replace(/^#/, ""), 16);
+  }
   await interaction.deferReply({ ephemeral: true });
 
   let role;
@@ -746,9 +856,6 @@ async function handleServerTagPanelCommand(interaction) {
     return interaction.editReply(error.message);
   }
 
-  const existing = db.prepare(
-    "SELECT channel_id, message_id, role_id FROM server_tag_panels WHERE guild_id = ?"
-  ).get(interaction.guildId);
   let panelMessage;
 
   if (existing && existing.role_id !== role.id) {
@@ -783,7 +890,9 @@ async function handleServerTagPanelCommand(interaction) {
     try {
       const oldMessage = await channel.messages.fetch(existing.message_id);
       panelMessage = await oldMessage.edit(
-        createServerTagPanelPayload(interaction.guildId, requiredTag, role.id)
+        createServerTagPanelPayload(interaction.guildId, requiredTag, role.id, {
+          title, description, color, bannerUrl, thumbnailUrl
+        })
       );
     } catch (error) {
       if (error.code !== 10003 && error.code !== 10008) throw error;
@@ -792,19 +901,32 @@ async function handleServerTagPanelCommand(interaction) {
 
   if (!panelMessage) {
     panelMessage = await channel.send(
-      createServerTagPanelPayload(interaction.guildId, requiredTag, role.id)
+      createServerTagPanelPayload(interaction.guildId, requiredTag, role.id, {
+        title, description, color, bannerUrl, thumbnailUrl
+      })
     );
   }
 
   db.prepare(`
-    INSERT INTO server_tag_panels (guild_id, channel_id, message_id, required_tag, role_id)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO server_tag_panels (
+      guild_id, channel_id, message_id, required_tag, role_id,
+      title, description, color, banner_url, thumbnail_url
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(guild_id) DO UPDATE SET
       channel_id = excluded.channel_id,
       message_id = excluded.message_id,
       required_tag = excluded.required_tag,
-      role_id = excluded.role_id
-  `).run(interaction.guildId, channel.id, panelMessage.id, requiredTag, role.id);
+      role_id = excluded.role_id,
+      title = excluded.title,
+      description = excluded.description,
+      color = excluded.color,
+      banner_url = excluded.banner_url,
+      thumbnail_url = excluded.thumbnail_url
+  `).run(
+    interaction.guildId, channel.id, panelMessage.id, requiredTag, role.id,
+    title, description, color, bannerUrl, thumbnailUrl
+  );
 
   if (existing && existing.message_id !== panelMessage.id) {
     try {
@@ -840,14 +962,13 @@ async function handleServerTagVerification(interaction) {
 
   await interaction.deferReply({ ephemeral: true });
   try {
-    const [role, member, user] = await Promise.all([
+    const [role, member, primaryGuild] = await Promise.all([
       getServerTagRole(interaction.guild, config.role_id),
       interaction.guild.members.fetch({ user: interaction.user.id, force: true }),
-      client.users.fetch(interaction.user.id, { force: true })
+      fetchUserPrimaryGuild(interaction.user.id)
     ]);
 
-    if (!userHasServerTag(user, config.required_tag, interaction.guildId) &&
-        !userHasServerTag(interaction.user, config.required_tag, interaction.guildId)) {
+    if (!userHasServerTag(primaryGuild, config.required_tag, interaction.guildId)) {
       if (member.roles.cache.has(role.id)) {
         await member.roles.remove(role, `Tag ${config.required_tag} não está ativa.`);
         db.prepare("DELETE FROM server_tag_verifications WHERE guild_id = ? AND user_id = ?")
@@ -921,9 +1042,8 @@ async function syncServerTagRole(member, config) {
     return;
   }
 
-  const user = await client.users.fetch(member.id, { force: true });
-  if (userHasServerTag(user, config.required_tag, member.guild.id) ||
-      userHasServerTag(member.user, config.required_tag, member.guild.id)) {
+  const primaryGuild = await fetchUserPrimaryGuild(member.id);
+  if (userHasServerTag(primaryGuild, config.required_tag, member.guild.id)) {
     db.prepare("INSERT OR IGNORE INTO server_tag_verifications (guild_id, user_id) VALUES (?, ?)")
       .run(member.guild.id, member.id);
     return;
