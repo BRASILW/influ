@@ -17,8 +17,10 @@ const {
 const required = ["DISCORD_TOKEN", "GUILD_ID"];
 const voiceChannelId = "1571359738682286161";
 const tinderProfileChannelId = "1570582366630576220";
-const hourlyRoleMentionChannelId = "1571687956459159632";
-const hourlyRoleMentionRoleId = "1570576646468276336";
+const hourlyRoleMentionTargets = [
+  { taskKey: "hourly-role-mention", channelId: "1571687956459159632", roleId: "1570576646468276336" },
+  { taskKey: "hourly-role-mention-1571341192778616974", channelId: "1571341192778616974", roleId: "1570576646468276336" }
+];
 const hourlyRoleMentionIntervalMs = 60 * 60 * 1000;
 const maxTinderMediaSize = 25 * 1024 * 1024;
 const tinderGenders = ["Homem", "Mulher", "Não binário", "Outro", "Prefiro não informar"];
@@ -222,8 +224,8 @@ const maxMuteDurationMs = 28 * 24 * 60 * 60 * 1000;
 let voiceConnection;
 let voiceReconnectTimer;
 let serverTagAuditRunning = false;
-let hourlyRoleMentionTimer;
-let hourlyRoleMentionRunning = false;
+const hourlyRoleMentionTimers = new Map();
+const hourlyRoleMentionRunning = new Set();
 const liveStatusMessageCache = new Map();
 const previousVoiceCounts = new Map();
 let liveStatusUpdateRunning = false;
@@ -536,25 +538,24 @@ async function sendServerLog(guild, embed) {
   await channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
 }
 
-async function sendHourlyRoleMention() {
-  const taskKey = "hourly-role-mention";
-  const channel = await client.channels.fetch(hourlyRoleMentionChannelId);
+async function sendHourlyRoleMention(target) {
+  const channel = await client.channels.fetch(target.channelId);
   if (!channel?.isTextBased() || !channel.guild) {
-    throw new Error(`O canal ${hourlyRoleMentionChannelId} não está acessível ou não é de texto.`);
+    throw new Error(`O canal ${target.channelId} não está acessível ou não é de texto.`);
   }
 
   const [role, botMember] = await Promise.all([
-    channel.guild.roles.fetch(hourlyRoleMentionRoleId),
+    channel.guild.roles.fetch(target.roleId),
     channel.guild.members.fetchMe()
   ]);
-  if (!role) throw new Error(`O cargo ${hourlyRoleMentionRoleId} não existe no servidor do canal.`);
+  if (!role) throw new Error(`O cargo ${target.roleId} não existe no servidor do canal.`);
   if (!role.mentionable && !botMember.permissions.has(PermissionFlagsBits.MentionEveryone)) {
     throw new Error(`O cargo ${role.id} precisa ser mencionável ou o bot precisa da permissão Mencionar @everyone.`);
   }
 
   const previous = db.prepare(
     "SELECT message_id FROM scheduled_role_mentions WHERE task_key = ?"
-  ).get(taskKey);
+  ).get(target.taskKey);
   if (previous) {
     try {
       const previousMessage = await channel.messages.fetch(previous.message_id);
@@ -579,7 +580,7 @@ async function sendHourlyRoleMention() {
         channel_id = excluded.channel_id,
         message_id = excluded.message_id,
         sent_at = excluded.sent_at
-    `).run(taskKey, channel.id, message.id, Date.now());
+    `).run(target.taskKey, channel.id, message.id, Date.now());
   } catch (error) {
     await message.delete().catch(deleteError => {
       console.error("Não foi possível limpar o aviso após falha ao salvar seu registro:", deleteError);
@@ -590,38 +591,43 @@ async function sendHourlyRoleMention() {
   console.log(`Aviso horário publicado em ${channel.id} e menção anterior removida.`);
 }
 
-function scheduleHourlyRoleMention(delayMs) {
-  if (hourlyRoleMentionTimer) clearTimeout(hourlyRoleMentionTimer);
-  hourlyRoleMentionTimer = setTimeout(async () => {
-    hourlyRoleMentionTimer = undefined;
-    if (hourlyRoleMentionRunning) {
-      scheduleHourlyRoleMention(60_000);
+function scheduleHourlyRoleMention(target, delayMs) {
+  const existingTimer = hourlyRoleMentionTimers.get(target.taskKey);
+  if (existingTimer) clearTimeout(existingTimer);
+  const timer = setTimeout(async () => {
+    hourlyRoleMentionTimers.delete(target.taskKey);
+    if (hourlyRoleMentionRunning.has(target.taskKey)) {
+      scheduleHourlyRoleMention(target, 60_000);
       return;
     }
 
-    hourlyRoleMentionRunning = true;
+    hourlyRoleMentionRunning.add(target.taskKey);
     let nextDelay = hourlyRoleMentionIntervalMs;
     try {
-      await sendHourlyRoleMention();
+      await sendHourlyRoleMention(target);
     } catch (error) {
-      console.error("Não foi possível enviar o aviso horário de cargo:", error);
+      console.error(`Não foi possível enviar o aviso horário de cargo no canal ${target.channelId}:`, error);
       nextDelay = 5 * 60_000;
     } finally {
-      hourlyRoleMentionRunning = false;
-      scheduleHourlyRoleMention(nextDelay);
+      hourlyRoleMentionRunning.delete(target.taskKey);
+      scheduleHourlyRoleMention(target, nextDelay);
     }
   }, Math.max(0, delayMs));
-  hourlyRoleMentionTimer.unref();
+  hourlyRoleMentionTimers.set(target.taskKey, timer);
+  timer.unref();
 }
 
 function startHourlyRoleMentionSchedule() {
-  const previous = db.prepare(
+  const getPrevious = db.prepare(
     "SELECT sent_at FROM scheduled_role_mentions WHERE task_key = ?"
-  ).get("hourly-role-mention");
-  const delayMs = previous
-    ? Math.max(0, previous.sent_at + hourlyRoleMentionIntervalMs - Date.now())
-    : 0;
-  scheduleHourlyRoleMention(delayMs);
+  );
+  for (const target of hourlyRoleMentionTargets) {
+    const previous = getPrevious.get(target.taskKey);
+    const delayMs = previous
+      ? Math.max(0, previous.sent_at + hourlyRoleMentionIntervalMs - Date.now())
+      : 0;
+    scheduleHourlyRoleMention(target, delayMs);
+  }
 }
 
 function saveInviteSnapshot(guildId, invites) {

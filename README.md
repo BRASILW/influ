@@ -77,8 +77,8 @@
 - O bot precisa de **Manage Roles**, e seu cargo mais alto deve estar acima do cargo configurado. O cargo precisa ser um cargo normal, não gerenciado por integração.
 
 ## Lembrete horário de cargo
-- O bot menciona o cargo `1570576646468276336` no canal `1571687956459159632` a cada hora.
-- Antes de enviar o próximo lembrete, apaga a mensagem anterior que ele próprio enviou. O horário do último envio é salvo no SQLite para manter o intervalo após reinicializações.
+- O bot menciona o cargo `1570576646468276336` a cada hora nos canais `1571687956459159632` e `1571341192778616974`.
+- Cada canal tem seu próprio horário salvo no SQLite. Antes de enviar o próximo lembrete em um canal, o bot apaga a mensagem anterior que ele próprio enviou naquele canal; reinicializações não reiniciam o intervalo.
 - O cargo precisa ser mencionável ou o bot precisa da permissão **Mention @everyone** no servidor.
 
 ## Entradas e convites
