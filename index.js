@@ -17,6 +17,9 @@ const {
 const required = ["DISCORD_TOKEN", "GUILD_ID"];
 const voiceChannelId = "1571359738682286161";
 const tinderProfileChannelId = "1570582366630576220";
+const hourlyRoleMentionChannelId = "1571687956459159632";
+const hourlyRoleMentionRoleId = "1570576646468276336";
+const hourlyRoleMentionIntervalMs = 60 * 60 * 1000;
 const maxTinderMediaSize = 25 * 1024 * 1024;
 const tinderGenders = ["Homem", "Mulher", "Não binário", "Outro", "Prefiro não informar"];
 for (const key of required) {
@@ -173,6 +176,12 @@ db.exec(`
     user_id TEXT NOT NULL,
     PRIMARY KEY (guild_id, user_id)
   );
+  CREATE TABLE IF NOT EXISTS scheduled_role_mentions (
+    task_key TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    sent_at INTEGER NOT NULL
+  );
 `);
 
 const activeMuteColumns = db.pragma("table_info(active_mutes)");
@@ -213,6 +222,8 @@ const maxMuteDurationMs = 28 * 24 * 60 * 60 * 1000;
 let voiceConnection;
 let voiceReconnectTimer;
 let serverTagAuditRunning = false;
+let hourlyRoleMentionTimer;
+let hourlyRoleMentionRunning = false;
 const liveStatusMessageCache = new Map();
 const previousVoiceCounts = new Map();
 let liveStatusUpdateRunning = false;
@@ -523,6 +534,94 @@ async function sendServerLog(guild, embed) {
     throw new Error(`O canal de registro ${muteLogChannelId} não está acessível.`);
   }
   await channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
+}
+
+async function sendHourlyRoleMention() {
+  const taskKey = "hourly-role-mention";
+  const channel = await client.channels.fetch(hourlyRoleMentionChannelId);
+  if (!channel?.isTextBased() || !channel.guild) {
+    throw new Error(`O canal ${hourlyRoleMentionChannelId} não está acessível ou não é de texto.`);
+  }
+
+  const [role, botMember] = await Promise.all([
+    channel.guild.roles.fetch(hourlyRoleMentionRoleId),
+    channel.guild.members.fetchMe()
+  ]);
+  if (!role) throw new Error(`O cargo ${hourlyRoleMentionRoleId} não existe no servidor do canal.`);
+  if (!role.mentionable && !botMember.permissions.has(PermissionFlagsBits.MentionEveryone)) {
+    throw new Error(`O cargo ${role.id} precisa ser mencionável ou o bot precisa da permissão Mencionar @everyone.`);
+  }
+
+  const previous = db.prepare(
+    "SELECT message_id FROM scheduled_role_mentions WHERE task_key = ?"
+  ).get(taskKey);
+  if (previous) {
+    try {
+      const previousMessage = await channel.messages.fetch(previous.message_id);
+      if (previousMessage.author.id !== client.user.id) {
+        throw new Error(`A mensagem salva ${previous.message_id} não pertence a este bot.`);
+      }
+      await previousMessage.delete();
+    } catch (error) {
+      if (error.code !== 10008) throw error;
+    }
+  }
+
+  const message = await channel.send({
+    content: `<@&${role.id}>`,
+    allowedMentions: { parse: [], roles: [role.id] }
+  });
+  try {
+    db.prepare(`
+      INSERT INTO scheduled_role_mentions (task_key, channel_id, message_id, sent_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(task_key) DO UPDATE SET
+        channel_id = excluded.channel_id,
+        message_id = excluded.message_id,
+        sent_at = excluded.sent_at
+    `).run(taskKey, channel.id, message.id, Date.now());
+  } catch (error) {
+    await message.delete().catch(deleteError => {
+      console.error("Não foi possível limpar o aviso após falha ao salvar seu registro:", deleteError);
+    });
+    throw error;
+  }
+
+  console.log(`Aviso horário publicado em ${channel.id} e menção anterior removida.`);
+}
+
+function scheduleHourlyRoleMention(delayMs) {
+  if (hourlyRoleMentionTimer) clearTimeout(hourlyRoleMentionTimer);
+  hourlyRoleMentionTimer = setTimeout(async () => {
+    hourlyRoleMentionTimer = undefined;
+    if (hourlyRoleMentionRunning) {
+      scheduleHourlyRoleMention(60_000);
+      return;
+    }
+
+    hourlyRoleMentionRunning = true;
+    let nextDelay = hourlyRoleMentionIntervalMs;
+    try {
+      await sendHourlyRoleMention();
+    } catch (error) {
+      console.error("Não foi possível enviar o aviso horário de cargo:", error);
+      nextDelay = 5 * 60_000;
+    } finally {
+      hourlyRoleMentionRunning = false;
+      scheduleHourlyRoleMention(nextDelay);
+    }
+  }, Math.max(0, delayMs));
+  hourlyRoleMentionTimer.unref();
+}
+
+function startHourlyRoleMentionSchedule() {
+  const previous = db.prepare(
+    "SELECT sent_at FROM scheduled_role_mentions WHERE task_key = ?"
+  ).get("hourly-role-mention");
+  const delayMs = previous
+    ? Math.max(0, previous.sent_at + hourlyRoleMentionIntervalMs - Date.now())
+    : 0;
+  scheduleHourlyRoleMention(delayMs);
 }
 
 function saveInviteSnapshot(guildId, invites) {
@@ -3067,6 +3166,7 @@ client.once("ready", async () => {
   }
 
   await connectToVoiceChannel();
+  startHourlyRoleMentionSchedule();
 
   await expireTimedMutes();
   const muteExpiryTimer = setInterval(() => {

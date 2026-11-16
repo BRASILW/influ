@@ -76,6 +76,11 @@
 - Tentativas, concessões e remoções são registradas em vermelho no canal `1571686069819285504`.
 - O bot precisa de **Manage Roles**, e seu cargo mais alto deve estar acima do cargo configurado. O cargo precisa ser um cargo normal, não gerenciado por integração.
 
+## Lembrete horário de cargo
+- O bot menciona o cargo `1570576646468276336` no canal `1571687956459159632` a cada hora.
+- Antes de enviar o próximo lembrete, apaga a mensagem anterior que ele próprio enviou. O horário do último envio é salvo no SQLite para manter o intervalo após reinicializações.
+- O cargo precisa ser mencionável ou o bot precisa da permissão **Mention @everyone** no servidor.
+
 ## Entradas e convites
 - Cada entrada humana gera um registro no canal `1571282224660357182`, com o membro e o criador do convite quando o uso de um convite específico puder ser identificado.
 - A criação de cada convite também é registrada com quem o criou, o canal, o link, o limite de usos e a validade. O bot não consegue detectar onde ou para quem alguém compartilhou o link fora do Discord.
