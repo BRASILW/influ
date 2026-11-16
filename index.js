@@ -1586,22 +1586,26 @@ function getTinderMediaType(attachment) {
   return mediaTypes[extension] || "application/octet-stream";
 }
 
-function createTinderProfileEmbed(profile, displayName, avatarUrl) {
-  const embed = new EmbedBuilder()
-    .setColor(0xeb459e)
-    .setAuthor({ name: displayName, iconURL: avatarUrl })
-    .setTitle(`${profile.age} anos`)
-    .setDescription(profile.bio || "Sem bio.")
-    .addFields(
-      { name: "Gênero", value: profile.gender, inline: true },
-      { name: "Cidade", value: profile.city, inline: true }
+function createTinderProfileComponents(profile, displayName, userId) {
+  const safeDisplayName = sanitizeTinderText(displayName.replace(/[\r\n]/g, " "));
+  const card = new ContainerBuilder()
+    .setAccentColor(0xeb459e)
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        `**${safeDisplayName} • ${profile.age} anos**\n\n` +
+        `${profile.bio || "Sem bio."}\n\n` +
+        `**Gênero:** ${profile.gender} • **Cidade:** ${profile.city}\n\n` +
+        "*Perfil 18+ • Use os botões para Metch ou passar.*"
+      )
     )
-    .setFooter({ text: "Perfil 18+ • Use os botões para Metch ou passar." });
+    .addMediaGalleryComponents(
+      new MediaGalleryBuilder().addItems(
+        new MediaGalleryItemBuilder().setURL(`attachment://${profile.media_name}`)
+      )
+    )
+    .addActionRowComponents(createTinderProfileButtons(userId));
 
-  if (profile.media_type.startsWith("image/")) {
-    embed.setImage(`attachment://${profile.media_name}`);
-  }
-  return embed;
+  return [card];
 }
 
 function createTinderProfileButtons(userId) {
@@ -1687,8 +1691,8 @@ async function handleTinderProfileSubmit(interaction) {
     ).get(interaction.guildId, interaction.user.id);
 
     sentMessage = await profileChannel.send({
-      embeds: [createTinderProfileEmbed(profile, displayName, interaction.user.displayAvatarURL())],
-      components: [createTinderProfileButtons(interaction.user.id)],
+      flags: MessageFlags.IsComponentsV2,
+      components: createTinderProfileComponents(profile, displayName, interaction.user.id),
       files: [new AttachmentBuilder(mediaBuffer, { name: mediaName })],
       allowedMentions: { parse: [] }
     });

@@ -53,7 +53,7 @@
 - Somente administradores podem usar `/tinder painel` para criar ou atualizar o painel. As opções `titulo`, `descricao`, `cor` e `canal` personalizam sua aparência e destino; por exemplo, `/tinder painel titulo:Encontre seu match cor:#FF55AA`.
 - O canal onde os perfis são publicados é `1570582366630576220`.
 - O botão de cadastro pede confirmação de maioridade e consentimento antes de abrir o formulário. O perfil exige uma foto ou vídeo (até 25 MB), gênero, idade mínima de 18 anos e cidade; a bio é opcional.
-- O botão de interesse aparece como **Metch**, em vermelho, com o emoji animado do servidor. O vídeo é enviado junto na mesma mensagem do perfil; o Discord renderiza o player como anexo separado do embed e não permite colocá-lo dentro do cartão.
+- O botão de interesse aparece como **Metch**, em vermelho, com o emoji animado do servidor. A foto ou o vídeo e os botões aparecem dentro do cartão de Components V2.
 - Os perfis e a mídia são públicos nesse canal. Usuários podem dar match ou passar; um match gera uma solicitação privada por DM. Ao aceitar, o bot atualiza a solicitação e cria um canal visível apenas aos dois participantes e ao bot.
 - O botão do painel permite atualizar ou remover o perfil e consultar matches. Ao remover, o perfil público é apagado e solicitações pendentes são canceladas.
 - O bot precisa de **View Channel**, **Send Messages**, **Embed Links**, **Attach Files** e **Read Message History** no canal de perfis. Para criar conversas após um aceite, também precisa de **Manage Channels** e acesso ao servidor.
