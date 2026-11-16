@@ -67,6 +67,13 @@
 - O cargo mais alto do bot precisa ficar acima do cargo de mute e dos membros moderados.
 - O bot precisa das permissões **Mute Members** e **Manage Roles**; moderadores precisam de **Moderate Members**.
 
+## Verificação da tag do servidor
+- Administradores usam `/verificacao-tag painel tag:RFF` para criar ou atualizar o painel. `cargo` e `canal` são opcionais; por padrão, o cargo é `1570583048569888889` e o painel vai para o canal atual.
+- O botão **Verificar** confere se a tag configurada está ativa no perfil do Discord e concede o cargo escolhido.
+- O bot verifica novamente quem recebeu o cargo a cada 5 minutos e também em atualizações do membro. Se a tag for removida ou desativada, o cargo é retirado.
+- Tentativas, concessões e remoções são registradas em vermelho no canal `1571686069819285504`.
+- O bot precisa de **Manage Roles**, e seu cargo mais alto deve estar acima do cargo configurado. O cargo precisa ser um cargo normal, não gerenciado por integração.
+
 ## Entradas e convites
 - Cada entrada humana gera um registro no canal `1571282224660357182`, com o membro e o criador do convite quando o uso de um convite específico puder ser identificado.
 - A criação de cada convite também é registrada com quem o criou, o canal, o link, o limite de usos e a validade. O bot não consegue detectar onde ou para quem alguém compartilhou o link fora do Discord.

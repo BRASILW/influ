@@ -156,6 +156,18 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (guild_id, swiper_id, target_id)
   );
+  CREATE TABLE IF NOT EXISTS server_tag_panels (
+    guild_id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    required_tag TEXT NOT NULL,
+    role_id TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS server_tag_verifications (
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    PRIMARY KEY (guild_id, user_id)
+  );
 `);
 
 const activeMuteColumns = db.pragma("table_info(active_mutes)");
@@ -176,10 +188,13 @@ const defaultPanelColor = 0x000000;
 const defaultDiscordInviteUrl = "https://discord.gg/KY4AEkxEeT";
 const configRoleId = "1570091171848392825";
 const muteRoleId = "1571368553926369361";
+const defaultServerTagRoleId = "1570583048569888889";
 const muteLogChannelId = "1571282224660357182";
+const serverTagLogChannelId = "1571686069819285504";
 const maxMuteDurationMs = 28 * 24 * 60 * 60 * 1000;
 let voiceConnection;
 let voiceReconnectTimer;
+let serverTagAuditRunning = false;
 const liveStatusMessageCache = new Map();
 const previousVoiceCounts = new Map();
 let liveStatusUpdateRunning = false;
@@ -294,6 +309,27 @@ const commands = [
         .setDescription("Nova cor hexadecimal, por exemplo #EB459E")
         .setRequired(false)
         .setMaxLength(7))),
+  new SlashCommandBuilder()
+    .setName("verificacao-tag")
+    .setDescription("Configura o painel de verificação da tag do servidor")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addSubcommand(subcommand => subcommand
+        .setName("painel")
+        .setDescription("Cria ou atualiza o painel de verificação")
+        .addStringOption(option => option
+          .setName("tag")
+          .setDescription("Tag do servidor exigida, por exemplo RFF")
+          .setRequired(true)
+          .setMaxLength(4))
+        .addRoleOption(option => option
+          .setName("cargo")
+          .setDescription("Cargo concedido após verificar (padrão: cargo configurado)")
+          .setRequired(false))
+        .addChannelOption(option => option
+          .setName("canal")
+          .setDescription("Canal do painel (padrão: canal atual)")
+          .setRequired(false)
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement))),
   new SlashCommandBuilder()
     .setName("mute")
     .setDescription("Silencia um membro temporariamente sem removê-lo da call")
@@ -599,6 +635,340 @@ function canModerateMember(target, moderator, botMember, guild) {
   if (target.roles.highest.comparePositionTo(botMember.roles.highest) >= 0) return false;
   return moderator.id === guild.ownerId ||
     target.roles.highest.comparePositionTo(moderator.roles.highest) < 0;
+}
+
+function userHasServerTag(user, requiredTag) {
+  const primaryGuild = user.primaryGuild;
+  return primaryGuild?.identityEnabled === true &&
+    primaryGuild.tag?.toLocaleUpperCase("en-US") === requiredTag;
+}
+
+async function getServerTagRole(guild, roleId) {
+  const [role, botMember] = await Promise.all([
+    guild.roles.fetch(roleId),
+    guild.members.fetchMe()
+  ]);
+  if (!role) throw new Error(`O cargo ${roleId} não existe neste servidor.`);
+  if (role.managed || role.id === guild.id) {
+    throw new Error("Escolha um cargo normal, que possa ser gerenciado pelo bot.");
+  }
+  if (!botMember.permissions.has(PermissionFlagsBits.ManageRoles)) {
+    throw new Error("O bot precisa da permissão Gerenciar Cargos.");
+  }
+  if (role.position >= botMember.roles.highest.position) {
+    throw new Error("Mova o cargo do bot para cima do cargo que será concedido.");
+  }
+  return role;
+}
+
+function createServerTagPanelPayload(guildId, requiredTag, roleId) {
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle(`Verificação da tag ${requiredTag}`)
+    .setDescription(
+      `Clique em **Verificar** para conferir se a tag **${requiredTag}** está ativa no seu perfil do Discord.\n` +
+      `Quem estiver com a tag recebe <@&${roleId}>. Se retirar a tag, o cargo será removido automaticamente.`
+    );
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`server-tag:verify:${guildId}`)
+      .setLabel("Verificar")
+      .setStyle(ButtonStyle.Success)
+  );
+  return {
+    embeds: [embed],
+    components: [row],
+    allowedMentions: { parse: [], roles: [] }
+  };
+}
+
+function logServerTagEvent(guild, member, requiredTag, roleId, result, action) {
+  const embed = new EmbedBuilder()
+    .setColor(0xed4245)
+    .setTitle("Registro • Verificação de tag")
+    .addFields(
+      { name: "Membro", value: `<@${member.id}> (\`${member.id}\`)`, inline: true },
+      { name: "Tag exigida", value: `**${requiredTag}**`, inline: true },
+      { name: "Resultado", value: result, inline: true },
+      { name: "Cargo", value: `<@&${roleId}> (\`${roleId}\`)`, inline: true },
+      { name: "Ação", value: action, inline: false }
+    )
+    .setFooter({ text: guild.name })
+    .setTimestamp();
+
+  guild.channels.fetch(serverTagLogChannelId)
+    .then(channel => {
+      if (!channel?.isTextBased()) {
+        throw new Error(`O canal de registro ${serverTagLogChannelId} não está acessível.`);
+      }
+      return channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
+    })
+    .catch(error => {
+      console.error(`Não foi possível registrar a verificação de tag de ${member.id}:`, error);
+    });
+}
+
+async function handleServerTagPanelCommand(interaction) {
+  if (!interaction.inGuild() || !interaction.guild ||
+      !interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+    return interaction.reply({
+      content: "Somente administradores podem configurar este painel.",
+      ephemeral: true
+    });
+  }
+
+  const requiredTag = interaction.options.getString("tag", true).trim().toLocaleUpperCase("en-US");
+  if (!/^[A-Z0-9]{1,4}$/.test(requiredTag)) {
+    return interaction.reply({
+      content: "Informe uma tag válida com 1 a 4 letras ou números, por exemplo `RFF`.",
+      ephemeral: true
+    });
+  }
+
+  const channel = interaction.options.getChannel("canal") || interaction.channel;
+  if (!channel?.isTextBased() || typeof channel.send !== "function" ||
+      channel.guildId !== interaction.guildId) {
+    return interaction.reply({ content: "Escolha um canal de texto deste servidor.", ephemeral: true });
+  }
+
+  const selectedRole = interaction.options.getRole("cargo");
+  const roleId = selectedRole?.id || defaultServerTagRoleId;
+  await interaction.deferReply({ ephemeral: true });
+
+  let role;
+  try {
+    role = await getServerTagRole(interaction.guild, roleId);
+  } catch (error) {
+    console.error("Configuração do painel de verificação de tag inválida:", error);
+    return interaction.editReply(error.message);
+  }
+
+  const existing = db.prepare(
+    "SELECT channel_id, message_id, role_id FROM server_tag_panels WHERE guild_id = ?"
+  ).get(interaction.guildId);
+  let panelMessage;
+
+  if (existing && existing.role_id !== role.id) {
+    const storedOldRole = await interaction.guild.roles.fetch(existing.role_id);
+    const oldRole = storedOldRole
+      ? await getServerTagRole(interaction.guild, existing.role_id)
+      : null;
+    const verifiedMembers = db.prepare(
+      "SELECT user_id FROM server_tag_verifications WHERE guild_id = ?"
+    ).all(interaction.guildId);
+    for (const verified of verifiedMembers) {
+      try {
+        const member = await interaction.guild.members.fetch({ user: verified.user_id, force: true });
+        if (oldRole && member.roles.cache.has(oldRole.id)) {
+          await member.roles.remove(oldRole, "Cargo de verificação substituído pela configuração do painel.");
+        }
+        db.prepare("DELETE FROM server_tag_verifications WHERE guild_id = ? AND user_id = ?")
+          .run(interaction.guildId, verified.user_id);
+      } catch (error) {
+        if (error.code === 10007) {
+          db.prepare("DELETE FROM server_tag_verifications WHERE guild_id = ? AND user_id = ?")
+            .run(interaction.guildId, verified.user_id);
+          continue;
+        }
+        console.error(`Não foi possível remover o cargo de verificação antigo de ${verified.user_id}:`, error);
+        throw new Error("Não consegui substituir o cargo porque não foi possível limpar uma verificação anterior.");
+      }
+    }
+  }
+
+  if (existing?.channel_id === channel.id) {
+    try {
+      const oldMessage = await channel.messages.fetch(existing.message_id);
+      panelMessage = await oldMessage.edit(
+        createServerTagPanelPayload(interaction.guildId, requiredTag, role.id)
+      );
+    } catch (error) {
+      if (error.code !== 10003 && error.code !== 10008) throw error;
+    }
+  }
+
+  if (!panelMessage) {
+    panelMessage = await channel.send(
+      createServerTagPanelPayload(interaction.guildId, requiredTag, role.id)
+    );
+  }
+
+  db.prepare(`
+    INSERT INTO server_tag_panels (guild_id, channel_id, message_id, required_tag, role_id)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(guild_id) DO UPDATE SET
+      channel_id = excluded.channel_id,
+      message_id = excluded.message_id,
+      required_tag = excluded.required_tag,
+      role_id = excluded.role_id
+  `).run(interaction.guildId, channel.id, panelMessage.id, requiredTag, role.id);
+
+  if (existing && existing.message_id !== panelMessage.id) {
+    try {
+      const oldChannel = await client.channels.fetch(existing.channel_id);
+      if (oldChannel?.isTextBased()) {
+        const oldMessage = await oldChannel.messages.fetch(existing.message_id);
+        await oldMessage.delete();
+      }
+    } catch (error) {
+      if (error.code !== 10003 && error.code !== 10008) {
+        console.error("Não foi possível remover o painel de verificação antigo:", error);
+      }
+    }
+  }
+
+  await interaction.editReply(`Painel de verificação da tag **${requiredTag}** configurado em <#${channel.id}> para conceder <@&${role.id}>.`);
+}
+
+async function handleServerTagVerification(interaction) {
+  if (!interaction.inGuild() || !interaction.guild) {
+    return interaction.reply({ content: "A verificação só pode ser usada dentro do servidor.", ephemeral: true });
+  }
+
+  const config = db.prepare(
+    "SELECT required_tag, role_id FROM server_tag_panels WHERE guild_id = ?"
+  ).get(interaction.guildId);
+  if (!config) {
+    return interaction.reply({
+      content: "O painel ainda não foi configurado por um administrador.",
+      ephemeral: true
+    });
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+  try {
+    const [role, member, user] = await Promise.all([
+      getServerTagRole(interaction.guild, config.role_id),
+      interaction.guild.members.fetch({ user: interaction.user.id, force: true }),
+      client.users.fetch(interaction.user.id, { force: true })
+    ]);
+
+    if (!userHasServerTag(user, config.required_tag) &&
+        !userHasServerTag(interaction.user, config.required_tag)) {
+      if (member.roles.cache.has(role.id)) {
+        await member.roles.remove(role, `Tag ${config.required_tag} não está ativa.`);
+        db.prepare("DELETE FROM server_tag_verifications WHERE guild_id = ? AND user_id = ?")
+          .run(interaction.guildId, member.id);
+        logServerTagEvent(
+          interaction.guild,
+          member,
+          config.required_tag,
+          role.id,
+          "Tag inativa",
+          "Cargo removido durante a verificação."
+        );
+        await interaction.editReply(`A tag **${config.required_tag}** não está ativa no seu perfil; removi o cargo <@&${role.id}>.`);
+        return;
+      }
+      logServerTagEvent(
+        interaction.guild,
+        member,
+        config.required_tag,
+        role.id,
+        "Não verificado",
+        "Tag não encontrada ou desativada no perfil."
+      );
+      await interaction.editReply(
+        `Não encontrei a tag **${config.required_tag}** ativa no seu perfil do Discord. Ative-a e tente novamente.`
+      );
+      return;
+    }
+
+    const alreadyHadRole = member.roles.cache.has(role.id);
+    if (!alreadyHadRole) {
+      db.prepare("INSERT OR IGNORE INTO server_tag_verifications (guild_id, user_id) VALUES (?, ?)")
+        .run(interaction.guildId, member.id);
+      try {
+        await member.roles.add(role, `Verificação da tag ${config.required_tag}`);
+      } catch (error) {
+        db.prepare("DELETE FROM server_tag_verifications WHERE guild_id = ? AND user_id = ?")
+          .run(interaction.guildId, member.id);
+        throw error;
+      }
+    } else {
+      db.prepare("INSERT OR IGNORE INTO server_tag_verifications (guild_id, user_id) VALUES (?, ?)")
+        .run(interaction.guildId, member.id);
+    }
+
+    logServerTagEvent(
+      interaction.guild,
+      member,
+      config.required_tag,
+      role.id,
+      "Verificado",
+      alreadyHadRole ? "Tag confirmada; membro já possuía o cargo." : "Cargo concedido."
+    );
+    await interaction.editReply(
+      alreadyHadRole
+        ? `A tag **${config.required_tag}** está ativa e você já possui o cargo <@&${role.id}>.`
+        : `Tag **${config.required_tag}** verificada. Você recebeu o cargo <@&${role.id}>.`
+    );
+  } catch (error) {
+    console.error(`Não foi possível verificar a tag de ${interaction.user.id}:`, error);
+    await interaction.editReply(
+      "Não consegui concluir a verificação. Confira as permissões e a posição do cargo do bot e tente novamente."
+    );
+  }
+}
+
+async function syncServerTagRole(member, config) {
+  if (!member.roles.cache.has(config.role_id)) {
+    db.prepare("DELETE FROM server_tag_verifications WHERE guild_id = ? AND user_id = ?")
+      .run(member.guild.id, member.id);
+    return;
+  }
+
+  const user = await client.users.fetch(member.id, { force: true });
+  if (userHasServerTag(user, config.required_tag) ||
+      userHasServerTag(member.user, config.required_tag)) {
+    db.prepare("INSERT OR IGNORE INTO server_tag_verifications (guild_id, user_id) VALUES (?, ?)")
+      .run(member.guild.id, member.id);
+    return;
+  }
+
+  const role = await getServerTagRole(member.guild, config.role_id);
+  await member.roles.remove(role, `Tag ${config.required_tag} não está mais ativa.`);
+  db.prepare("DELETE FROM server_tag_verifications WHERE guild_id = ? AND user_id = ?")
+    .run(member.guild.id, member.id);
+  logServerTagEvent(
+    member.guild,
+    member,
+    config.required_tag,
+    role.id,
+    "Tag inativa",
+    "Cargo removido automaticamente."
+  );
+  console.log(`Cargo de verificação removido de ${member.id}: tag ${config.required_tag} ausente.`);
+}
+
+async function auditServerTagVerifications() {
+  const verifications = db.prepare(`
+    SELECT verification.guild_id, verification.user_id, panel.required_tag, panel.role_id
+    FROM server_tag_verifications AS verification
+    JOIN server_tag_panels AS panel ON panel.guild_id = verification.guild_id
+  `).all();
+
+  for (const verification of verifications) {
+    const guild = client.guilds.cache.get(verification.guild_id);
+    if (!guild) continue;
+
+    try {
+      const member = await guild.members.fetch({ user: verification.user_id, force: true });
+      if (!member.roles.cache.has(verification.role_id)) {
+        db.prepare("DELETE FROM server_tag_verifications WHERE guild_id = ? AND user_id = ?")
+          .run(verification.guild_id, verification.user_id);
+        continue;
+      }
+      await syncServerTagRole(member, verification);
+    } catch (error) {
+      if (error.code === 10007) {
+        db.prepare("DELETE FROM server_tag_verifications WHERE guild_id = ? AND user_id = ?")
+          .run(verification.guild_id, verification.user_id);
+      } else {
+        console.error(`Não foi possível sincronizar o cargo de tag de ${verification.user_id}:`, error);
+      }
+    }
+  }
 }
 
 async function handleMuteCommand(interaction) {
@@ -2589,6 +2959,19 @@ client.once("ready", async () => {
 
   await refreshTinderProfiles();
 
+  const updateServerTagVerifications = () => {
+    if (serverTagAuditRunning) return;
+    serverTagAuditRunning = true;
+    auditServerTagVerifications()
+      .catch(error => console.error("Erro ao sincronizar cargos de tag:", error))
+      .finally(() => {
+        serverTagAuditRunning = false;
+      });
+  };
+  updateServerTagVerifications();
+  const serverTagAuditTimer = setInterval(updateServerTagVerifications, 5 * 60_000);
+  serverTagAuditTimer.unref();
+
   const updateLiveStatuses = () => {
     if (liveStatusUpdateRunning) return;
     liveStatusUpdateRunning = true;
@@ -2608,6 +2991,22 @@ client.on("guildMemberAdd", member => {
   inviteTrackingQueue = inviteTrackingQueue
     .then(() => handleGuildMemberJoin(member))
     .catch(error => console.error(`Erro ao registrar a entrada de ${member.id}:`, error));
+});
+
+client.on("guildMemberUpdate", (oldMember, newMember) => {
+  const config = db.prepare(
+    "SELECT required_tag, role_id FROM server_tag_panels WHERE guild_id = ?"
+  ).get(newMember.guild.id);
+  if (!config || !newMember.roles.cache.has(config.role_id)) return;
+
+  syncServerTagRole(newMember, config).catch(error => {
+    console.error(`Erro ao sincronizar a tag de ${newMember.id}:`, error);
+  });
+});
+
+client.on("guildMemberRemove", member => {
+  db.prepare("DELETE FROM server_tag_verifications WHERE guild_id = ? AND user_id = ?")
+    .run(member.guild.id, member.id);
 });
 
 client.on("inviteCreate", invite => {
@@ -2640,6 +3039,12 @@ client.on("interactionCreate", async interaction => {
       }
     }
 
+    if (interaction.isChatInputCommand() && interaction.commandName === "verificacao-tag") {
+      if (interaction.options.getSubcommand() === "painel") {
+        return await handleServerTagPanelCommand(interaction);
+      }
+    }
+
     if (interaction.isChatInputCommand() && interaction.commandName === "configurar-painel") {
       if (!interaction.inGuild() || !memberHasConfigRole(interaction.member)) {
         return interaction.reply({ content: "Somente membros com o cargo autorizado podem alterar as configurações.", ephemeral: true });
@@ -2661,6 +3066,14 @@ client.on("interactionCreate", async interaction => {
 
     if (interaction.isButton() && interaction.customId.startsWith("tinder:")) {
       return await handleTinderButton(interaction);
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith("server-tag:verify:")) {
+      const panelGuildId = interaction.customId.split(":")[2];
+      if (!interaction.inGuild() || panelGuildId !== interaction.guildId) {
+        return interaction.reply({ content: "Este painel pertence a outro servidor.", ephemeral: true });
+      }
+      return await handleServerTagVerification(interaction);
     }
 
     if (interaction.isButton() && interaction.customId === "open_publish") {
