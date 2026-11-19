@@ -21,7 +21,7 @@ const hourlyRoleMentionTargets = [
   { taskKey: "hourly-role-mention", channelId: "1571687956459159632", roleId: "1570576646468276336" },
   { taskKey: "hourly-role-mention-1571341192778616974", channelId: "1571341192778616974", roleId: "1570576646468276336" }
 ];
-const hourlyRoleMentionIntervalMs = 60 * 60 * 1000;
+const hourlyRoleMentionIntervalMs = 24 * 60 * 60 * 1000;
 const statusTimeZone = "America/Sao_Paulo";
 const statusDateFormatter = new Intl.DateTimeFormat("en-US", {
   timeZone: statusTimeZone,
